@@ -1,7 +1,7 @@
-package com.noisetta.nikonpull.data
+package io.github.noisetta.nikonpull.data
 
 import android.content.Context
-import com.noisetta.nikonpull.ptp.PtpIpClient
+import io.github.noisetta.nikonpull.ptp.PtpIpClient
 import java.util.UUID
 
 data class CameraEndpointSettings(

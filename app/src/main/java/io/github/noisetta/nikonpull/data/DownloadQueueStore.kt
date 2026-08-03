@@ -1,7 +1,7 @@
-package com.noisetta.nikonpull.data
+package io.github.noisetta.nikonpull.data
 
 import android.content.Context
-import com.noisetta.nikonpull.ptp.CameraObject
+import io.github.noisetta.nikonpull.ptp.CameraObject
 import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject

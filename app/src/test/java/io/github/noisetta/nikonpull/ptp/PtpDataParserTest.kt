@@ -1,4 +1,4 @@
-package com.noisetta.nikonpull.ptp
+package io.github.noisetta.nikonpull.ptp
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue

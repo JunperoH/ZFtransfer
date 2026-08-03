@@ -1,10 +1,10 @@
-package com.noisetta.nikonpull.data
+package io.github.noisetta.nikonpull.data
 
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
 import android.provider.MediaStore
-import com.noisetta.nikonpull.ptp.CameraObject
+import io.github.noisetta.nikonpull.ptp.CameraObject
 import java.io.Closeable
 import java.io.FilterOutputStream
 import java.io.OutputStream

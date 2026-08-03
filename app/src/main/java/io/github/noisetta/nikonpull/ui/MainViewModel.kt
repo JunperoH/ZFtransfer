@@ -1,4 +1,4 @@
-package com.noisetta.nikonpull.ui
+package io.github.noisetta.nikonpull.ui
 
 import android.app.Application
 import android.content.Context
@@ -10,19 +10,19 @@ import android.os.PowerManager
 import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.noisetta.nikonpull.BuildConfig
-import com.noisetta.nikonpull.data.CameraEndpointSettings
-import com.noisetta.nikonpull.data.CameraSettings
-import com.noisetta.nikonpull.data.GalleryCache
-import com.noisetta.nikonpull.data.DownloadQueueSnapshot
-import com.noisetta.nikonpull.data.DownloadQueueStore
-import com.noisetta.nikonpull.data.PhotoSaver
-import com.noisetta.nikonpull.network.CameraNetworkLease
-import com.noisetta.nikonpull.network.CameraNetworkResolver
-import com.noisetta.nikonpull.ptp.CameraDeviceInfo
-import com.noisetta.nikonpull.ptp.CameraObject
-import com.noisetta.nikonpull.ptp.PtpException
-import com.noisetta.nikonpull.ptp.PtpIpClient
+import io.github.noisetta.nikonpull.BuildConfig
+import io.github.noisetta.nikonpull.data.CameraEndpointSettings
+import io.github.noisetta.nikonpull.data.CameraSettings
+import io.github.noisetta.nikonpull.data.GalleryCache
+import io.github.noisetta.nikonpull.data.DownloadQueueSnapshot
+import io.github.noisetta.nikonpull.data.DownloadQueueStore
+import io.github.noisetta.nikonpull.data.PhotoSaver
+import io.github.noisetta.nikonpull.network.CameraNetworkLease
+import io.github.noisetta.nikonpull.network.CameraNetworkResolver
+import io.github.noisetta.nikonpull.ptp.CameraDeviceInfo
+import io.github.noisetta.nikonpull.ptp.CameraObject
+import io.github.noisetta.nikonpull.ptp.PtpException
+import io.github.noisetta.nikonpull.ptp.PtpIpClient
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -408,7 +408,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val queue = existing?.copy(
             cameraIdentity = existing.cameraIdentity.ifBlank { currentCameraIdentity },
-            items = existing.items + additions.map { com.noisetta.nikonpull.data.QueuedDownload(it) },
+            items = existing.items + additions.map { io.github.noisetta.nikonpull.data.QueuedDownload(it) },
             totalCount = existing.totalCount + additions.size,
             totalBytes = existing.totalBytes + additions.sumOf { it.size.coerceAtLeast(0L) },
         ) ?: DownloadQueueSnapshot.create(additions, currentCameraIdentity)

@@ -1,4 +1,4 @@
-package com.noisetta.nikonpull.network
+package io.github.noisetta.nikonpull.network
 
 import android.content.Context
 import android.net.ConnectivityManager

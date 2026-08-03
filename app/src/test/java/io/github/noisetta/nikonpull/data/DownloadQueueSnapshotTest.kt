@@ -1,6 +1,6 @@
-package com.noisetta.nikonpull.data
+package io.github.noisetta.nikonpull.data
 
-import com.noisetta.nikonpull.ptp.CameraObject
+import io.github.noisetta.nikonpull.ptp.CameraObject
 import org.junit.Assert.assertEquals
 import org.junit.Test
 

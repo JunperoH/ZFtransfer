@@ -1,4 +1,4 @@
-package com.noisetta.nikonpull.ptp
+package io.github.noisetta.nikonpull.ptp
 
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer

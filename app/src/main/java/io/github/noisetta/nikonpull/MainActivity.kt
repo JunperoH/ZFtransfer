@@ -1,4 +1,4 @@
-package com.noisetta.nikonpull
+package io.github.noisetta.nikonpull
 
 import android.content.Intent
 import android.graphics.BitmapFactory
@@ -67,9 +67,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.noisetta.nikonpull.ptp.CameraObject
-import com.noisetta.nikonpull.ui.MainViewModel
-import com.noisetta.nikonpull.ui.DownloadResultSummary
+import io.github.noisetta.nikonpull.ptp.CameraObject
+import io.github.noisetta.nikonpull.ui.MainViewModel
+import io.github.noisetta.nikonpull.ui.DownloadResultSummary
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId

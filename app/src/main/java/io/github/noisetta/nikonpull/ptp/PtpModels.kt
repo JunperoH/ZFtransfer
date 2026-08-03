@@ -1,4 +1,4 @@
-package com.noisetta.nikonpull.ptp
+package io.github.noisetta.nikonpull.ptp
 
 data class CameraObject(
     val handle: Long,

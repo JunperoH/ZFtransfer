@@ -1,4 +1,4 @@
-package com.noisetta.nikonpull.ptp
+package io.github.noisetta.nikonpull.ptp
 
 internal object PtpDataParser {
     fun parseDeviceInfo(data: ByteArray, responderGuid: String = ""): CameraDeviceInfo {

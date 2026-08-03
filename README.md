@@ -6,7 +6,7 @@ The Nikon D5300 is the first physically verified camera. Other cameras designed 
 
 ## Current test build
 
-Version `0.7.0-beta.1` requires Android 10 or newer and targets Android 16/API 36. The installable debug APK is at `app/build/outputs/apk/debug/app-debug.apk` after a successful build.
+Version `0.7.0-beta.2` requires Android 10 or newer and targets Android 16/API 36. Its permanent Android application ID is `io.github.noisetta.nikonpull`. The installable debug APK is at `app/build/outputs/apk/debug/app-debug.apk` after a successful build.
 
 ## Features
 

@@ -7,15 +7,15 @@ plugins {
 }
 
 android {
-    namespace = "com.noisetta.nikonpull"
+    namespace = "io.github.noisetta.nikonpull"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.noisetta.nikonpull"
+        applicationId = "io.github.noisetta.nikonpull"
         minSdk = 29
         targetSdk = 36
-        versionCode = 19
-        versionName = "0.7.0-beta.1"
+        versionCode = 20
+        versionName = "0.7.0-beta.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
