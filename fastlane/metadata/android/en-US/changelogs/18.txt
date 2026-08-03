@@ -1,0 +1,1 @@
+Added camera identity and capability detection, flexible gateway discovery, manual endpoint settings, per-camera offline caches, additional Nikon media formats, camera-specific download protection, and privacy-safe compatibility reports.

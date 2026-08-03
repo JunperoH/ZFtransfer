@@ -1,0 +1,49 @@
+name: Camera compatibility report
+description: Report a successful or unsuccessful hardware test
+title: "[Camera] "
+labels: [camera-compatibility]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include camera serial numbers, Wi-Fi passwords, photographs, or unredacted packet captures.
+  - type: input
+    id: camera
+    attributes:
+      label: Camera model
+      placeholder: Nikon D5300
+    validations:
+      required: true
+  - type: dropdown
+    id: wifi
+    attributes:
+      label: Wi-Fi method
+      options:
+        - Built-in Wi-Fi
+        - WU-1a adapter
+        - WU-1b adapter
+        - Other or unknown
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Privacy-safe compatibility report
+      description: Paste the text produced by Camera → Share privacy-safe compatibility report.
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: tests
+    attributes:
+      label: Tests completed
+      options:
+        - label: Catalog loaded
+        - label: JPEG thumbnails displayed
+        - label: JPEG original downloaded and opened externally
+        - label: RAW original downloaded
+        - label: Video original downloaded
+        - label: Reconnected after disabling and re-enabling camera Wi-Fi
+  - type: textarea
+    id: notes
+    attributes:
+      label: Errors or additional notes

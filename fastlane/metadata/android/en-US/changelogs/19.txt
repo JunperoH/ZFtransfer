@@ -1,0 +1,1 @@
+Prepared the first public beta with a GPL license, privacy and security documentation, compatibility test templates, a verified Gradle wrapper, API 36 support, hardened CI, and an original camera-download app icon.

@@ -1,0 +1,40 @@
+name: Bug report
+description: Report a reproducible app problem
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Nikon Pull version
+      placeholder: 0.6.0-compatibility
+    validations:
+      required: true
+  - type: input
+    id: android
+    attributes:
+      label: Phone and Android version
+    validations:
+      required: true
+  - type: input
+    id: camera
+    attributes:
+      label: Camera model
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and exact error text
+    validations:
+      required: true
