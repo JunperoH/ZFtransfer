@@ -67,6 +67,37 @@ class PtpIpClientTransferTest {
         client.abort()
     }
 
+    @Test
+    fun partialObjectDownloadResumesFromCompletedOffset() {
+        val objectBytes = "prefix-already-saved-and-the-remaining-video-data".toByteArray()
+        val startOffset = 21
+        val remainingBytes = objectBytes.copyOfRange(startOffset, objectBytes.size)
+        val commandSocket = ScriptedSocket(partialObjectConversation(remainingBytes, chunkSize = 8))
+        val eventSocket = ScriptedSocket(packet(TYPE_INIT_EVENT_ACK))
+        val client = PtpIpClient(
+            socketFactory = QueuedSocketFactory(commandSocket, eventSocket),
+        )
+
+        client.connect()
+        val destination = ByteArrayOutputStream().apply {
+            write(objectBytes, 0, startOffset)
+        }
+        val checkpoints = mutableListOf<Long>()
+        client.downloadObjectInChunks(
+            handle = 42L,
+            objectSize = objectBytes.size.toLong(),
+            destination = destination,
+            startOffset = startOffset.toLong(),
+            onChunkCompleted = checkpoints::add,
+            chunkSize = 8,
+        )
+
+        assertArrayEquals(objectBytes, destination.toByteArray())
+        assertTrue(checkpoints.all { it > startOffset })
+        assertEquals(objectBytes.size.toLong(), checkpoints.last())
+        client.abort()
+    }
+
     private fun commandConversation(objectBytes: ByteArray): ByteArray = join(
         packet(
             TYPE_INIT_COMMAND_ACK,

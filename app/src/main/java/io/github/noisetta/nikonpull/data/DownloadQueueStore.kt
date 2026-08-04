@@ -9,6 +9,8 @@ import org.json.JSONObject
 data class QueuedDownload(
     val media: CameraObject,
     val attempts: Int = 0,
+    val pendingUri: String = "",
+    val downloadedBytes: Long = 0L,
 )
 
 data class DownloadQueueSnapshot(
@@ -59,6 +61,9 @@ class DownloadQueueStore(context: Context) {
                             captureDate = item.optString("captureDate"),
                         ),
                         attempts = item.optInt("attempts"),
+                        pendingUri = item.optString("pendingUri"),
+                        downloadedBytes = item.optLong("downloadedBytes")
+                            .coerceIn(0L, item.getLong("size").coerceAtLeast(0L)),
                     ),
                 )
             }
@@ -98,7 +103,9 @@ class DownloadQueueStore(context: Context) {
                     .put("thumbnailSize", media.thumbnailSize)
                     .put("filename", media.filename)
                     .put("captureDate", media.captureDate)
-                    .put("attempts", queued.attempts),
+                    .put("attempts", queued.attempts)
+                    .put("pendingUri", queued.pendingUri)
+                    .put("downloadedBytes", queued.downloadedBytes),
             )
         }
         val failed = JSONArray().also { array ->
@@ -134,7 +141,7 @@ class DownloadQueueStore(context: Context) {
     }
 
     private companion object {
-        const val VERSION = 3
+        const val VERSION = 4
         const val DIRECTORY = "downloads"
         const val QUEUE_FILENAME = "queue.json"
     }

@@ -174,12 +174,30 @@ class PtpIpClient(
         handle: Long,
         objectSize: Long,
         destination: OutputStream,
+        startOffset: Long = 0L,
+        onChunkCompleted: (Long) -> Unit = {},
         onProgress: (TransferProgress) -> Unit = {},
     ) {
-        if (supportsPartialObject && objectSize > PARTIAL_OBJECT_THRESHOLD_BYTES) {
-            downloadObjectInChunks(handle, objectSize, destination, onProgress)
+        require(startOffset in 0..objectSize.coerceAtLeast(0L)) {
+            "Resume offset $startOffset is outside the $objectSize-byte object"
+        }
+        if (supportsPartialObject &&
+            (objectSize > PARTIAL_OBJECT_THRESHOLD_BYTES || startOffset > 0L)
+        ) {
+            downloadObjectInChunks(
+                handle = handle,
+                objectSize = objectSize,
+                destination = destination,
+                startOffset = startOffset,
+                onChunkCompleted = onChunkCompleted,
+                onProgress = onProgress,
+            )
         } else {
+            if (startOffset > 0L) {
+                throw PtpException("Camera does not support resuming partial object downloads")
+            }
             downloadObject(handle, destination, onProgress)
+            onChunkCompleted(objectSize)
         }
     }
 
@@ -188,6 +206,8 @@ class PtpIpClient(
         handle: Long,
         objectSize: Long,
         destination: OutputStream,
+        startOffset: Long = 0L,
+        onChunkCompleted: (Long) -> Unit = {},
         onProgress: (TransferProgress) -> Unit = {},
         chunkSize: Int = PARTIAL_OBJECT_CHUNK_BYTES,
     ) {
@@ -195,9 +215,12 @@ class PtpIpClient(
             "GetPartialObject supports files up to $MAX_PARTIAL_OBJECT_SIZE bytes"
         }
         require(chunkSize > 0) { "Chunk size must be positive" }
+        require(startOffset in 0..objectSize) {
+            "Resume offset $startOffset is outside the $objectSize-byte object"
+        }
 
-        var offset = 0L
-        onProgress(TransferProgress(0L, objectSize))
+        var offset = startOffset
+        onProgress(TransferProgress(offset, objectSize))
         while (offset < objectSize) {
             val requested = minOf(chunkSize.toLong(), objectSize - offset)
             val chunkOffset = offset
@@ -224,6 +247,7 @@ class PtpIpClient(
                 )
             }
             offset += received
+            onChunkCompleted(offset)
             onProgress(TransferProgress(offset, objectSize))
         }
         destination.flush()

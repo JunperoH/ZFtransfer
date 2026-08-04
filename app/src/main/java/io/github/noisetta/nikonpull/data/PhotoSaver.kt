@@ -3,6 +3,7 @@ package io.github.noisetta.nikonpull.data
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import io.github.noisetta.nikonpull.ptp.CameraObject
 import java.io.Closeable
@@ -18,7 +19,8 @@ object PhotoSaver {
             MediaStore.MediaColumns.SIZE,
         )
         val selection = "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND " +
-            "${MediaStore.MediaColumns.SIZE} = ?"
+            "${MediaStore.MediaColumns.SIZE} = ? AND " +
+            "${MediaStore.MediaColumns.IS_PENDING} = 0"
         val arguments = arrayOf(photo.filename, photo.size.toString())
         return context.contentResolver.query(
             collection(photo),
@@ -37,7 +39,7 @@ object PhotoSaver {
         } ?: false
     }
 
-    fun cleanupIncomplete(context: Context) {
+    fun cleanupIncomplete(context: Context, retainedUris: Set<String> = emptySet()) {
         listOf(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI to PHOTO_DESTINATION_DIRECTORY,
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI to VIDEO_DESTINATION_DIRECTORY,
@@ -60,11 +62,88 @@ object PhotoSaver {
                     }
                 }
             }.orEmpty()
-            staleUris.forEach { uri -> runCatching { context.contentResolver.delete(uri, null, null) } }
+            staleUris
+                .filterNot { it.toString() in retainedUris }
+                .forEach { uri -> runCatching { context.contentResolver.delete(uri, null, null) } }
         }
     }
 
-    fun createPending(context: Context, photo: CameraObject): PendingPhoto {
+    fun openPending(
+        context: Context,
+        photo: CameraObject,
+        pendingUri: String,
+        resumeBytes: Long,
+    ): PendingPhoto {
+        val safeResumeBytes = resumeBytes.coerceIn(0L, photo.size.coerceAtLeast(0L))
+        if (pendingUri.isNotBlank()) {
+            val existing = openExisting(context, photo, Uri.parse(pendingUri), safeResumeBytes)
+            if (existing != null) return existing
+            discardIncomplete(context, pendingUri)
+        }
+        return createPending(context, photo)
+    }
+
+    fun discardIncomplete(context: Context, uriString: String) {
+        if (uriString.isBlank()) return
+        val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return
+        val isPending = runCatching {
+            context.contentResolver.query(
+                uri,
+                arrayOf(MediaStore.MediaColumns.IS_PENDING),
+                null,
+                null,
+                null,
+            )?.use { cursor -> cursor.moveToFirst() && cursor.getInt(0) == 1 } == true
+        }.getOrDefault(false)
+        if (isPending) runCatching { context.contentResolver.delete(uri, null, null) }
+    }
+
+    private fun openExisting(
+        context: Context,
+        photo: CameraObject,
+        uri: Uri,
+        resumeBytes: Long,
+    ): PendingPhoto? {
+        val expectedDirectory = destinationDirectory(photo)
+        val validMetadata = context.contentResolver.query(
+            uri,
+            arrayOf(
+                MediaStore.MediaColumns.DISPLAY_NAME,
+                MediaStore.MediaColumns.RELATIVE_PATH,
+                MediaStore.MediaColumns.IS_PENDING,
+            ),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            if (!cursor.moveToFirst()) return@use false
+            cursor.getString(0) == photo.filename &&
+                cursor.getString(1).orEmpty().trimEnd('/') == expectedDirectory &&
+                cursor.getInt(2) == 1
+        } == true
+        if (!validMetadata) return null
+
+        val descriptor = context.contentResolver.openFileDescriptor(uri, "rw") ?: return null
+        return try {
+            val output = ParcelFileDescriptor.AutoCloseOutputStream(descriptor)
+            // ParcelFileDescriptor.statSize may be unknown or stale for an IS_PENDING
+            // MediaStore item. The channel is backed by the actual file and reports the
+            // durable bytes written before the previous process stopped.
+            val storedSize = output.channel.size()
+            if (storedSize < resumeBytes) {
+                output.close()
+                return null
+            }
+            output.channel.truncate(resumeBytes)
+            output.channel.position(resumeBytes)
+            PendingPhoto(context, uri, descriptor, output, resumeBytes)
+        } catch (error: Throwable) {
+            runCatching { descriptor.close() }
+            throw error
+        }
+    }
+
+    private fun createPending(context: Context, photo: CameraObject): PendingPhoto {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, photo.filename)
             put(MediaStore.MediaColumns.MIME_TYPE, photo.mimeType)
@@ -79,9 +158,10 @@ object PhotoSaver {
         val uri = resolver.insert(collection, values)
             ?: error("Android could not create ${photo.filename}")
         return try {
-            val output = resolver.openOutputStream(uri, "w")
+            val descriptor = resolver.openFileDescriptor(uri, "rw")
                 ?: error("Android could not open ${photo.filename}")
-            PendingPhoto(context, uri, output)
+            val output = ParcelFileDescriptor.AutoCloseOutputStream(descriptor)
+            PendingPhoto(context, uri, descriptor, output, 0L)
         } catch (error: Throwable) {
             resolver.delete(uri, null, null)
             throw error
@@ -91,50 +171,69 @@ object PhotoSaver {
     class PendingPhoto internal constructor(
         private val context: Context,
         val uri: Uri,
-        rawOutput: OutputStream,
+        private val descriptor: ParcelFileDescriptor,
+        private val fileOutput: ParcelFileDescriptor.AutoCloseOutputStream,
+        initialBytes: Long,
     ) : Closeable {
         private var committed = false
-        private val countingOutput = CountingOutputStream(rawOutput)
+        private var closed = false
+        private val countingOutput = CountingOutputStream(fileOutput, initialBytes)
         val output: OutputStream get() = countingOutput
+        val bytesWritten: Long get() = countingOutput.bytesWritten
+
+        fun checkpoint(expectedBytes: Long) {
+            if (countingOutput.bytesWritten != expectedBytes) {
+                throw IllegalStateException(
+                    "Downloaded ${countingOutput.bytesWritten} bytes; expected checkpoint $expectedBytes",
+                )
+            }
+            countingOutput.flush()
+            descriptor.fileDescriptor.sync()
+        }
 
         fun commit(expectedSize: Long) {
-            countingOutput.flush()
-            countingOutput.close()
+            checkpoint(expectedSize)
             if (expectedSize > 0L && countingOutput.bytesWritten != expectedSize) {
                 throw IllegalStateException(
                     "Downloaded ${countingOutput.bytesWritten} of $expectedSize bytes",
                 )
             }
+            // MediaStore reports SIZE as null while IS_PENDING is still set. Verify the
+            // actual file before publishing it, while a failed check can still be discarded.
+            val storedSize = fileOutput.channel.size()
+            if (expectedSize > 0L && storedSize != expectedSize) {
+                throw IllegalStateException("Android stored $storedSize of $expectedSize bytes")
+            }
+            closeOutput()
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.IS_PENDING, 0)
             }
-            context.contentResolver.update(uri, values, null, null)
-            val storedSize = context.contentResolver.query(
-                uri,
-                arrayOf(MediaStore.MediaColumns.SIZE),
-                null,
-                null,
-                null,
-            )?.use { cursor ->
-                if (cursor.moveToFirst()) cursor.getLong(0) else null
-            }
-            if (expectedSize > 0L && storedSize != expectedSize) {
-                context.contentResolver.delete(uri, null, null)
-                throw IllegalStateException("Android stored ${storedSize ?: 0L} of $expectedSize bytes")
+            if (context.contentResolver.update(uri, values, null, null) != 1) {
+                throw IllegalStateException("Android could not finish ${uri.lastPathSegment.orEmpty()}")
             }
             committed = true
         }
 
-        override fun close() {
-            runCatching { countingOutput.close() }
+        fun discard() {
+            closeOutput()
             if (!committed) {
-                context.contentResolver.delete(uri, null, null)
+                discardIncomplete(context, uri.toString())
             }
+        }
+
+        override fun close() {
+            closeOutput()
+        }
+
+        private fun closeOutput() {
+            if (closed) return
+            closed = true
+            runCatching { countingOutput.close() }
         }
     }
 
-    private class CountingOutputStream(output: OutputStream) : FilterOutputStream(output) {
-        var bytesWritten: Long = 0L
+    private class CountingOutputStream(output: OutputStream, initialBytes: Long) : FilterOutputStream(output) {
+        var bytesWritten: Long = initialBytes
             private set
 
         override fun write(byte: Int) {

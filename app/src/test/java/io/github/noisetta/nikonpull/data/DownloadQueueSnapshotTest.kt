@@ -32,6 +32,20 @@ class DownloadQueueSnapshotTest {
         assertEquals(1, queue.failedCount)
     }
 
+    @Test
+    fun queuedDownloadRetainsResumeCheckpoint() {
+        val queued = QueuedDownload(
+            media = media(7L, 72_671_488L),
+            attempts = 1,
+            pendingUri = "content://media/external/video/media/31",
+            downloadedBytes = 41_943_040L,
+        )
+
+        assertEquals("content://media/external/video/media/31", queued.pendingUri)
+        assertEquals(41_943_040L, queued.downloadedBytes)
+        assertEquals(1, queued.attempts)
+    }
+
     private fun media(handle: Long, size: Long) = CameraObject(
         handle = handle,
         storageId = 1L,

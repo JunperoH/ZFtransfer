@@ -6,7 +6,7 @@ The Nikon D5300 is the first physically verified camera. Other cameras designed 
 
 ## Current test build
 
-Version `0.7.0-beta.3` requires Android 10 or newer and targets Android 16/API 36. Its permanent Android application ID is `io.github.noisetta.nikonpull`. The installable debug APK is at `app/build/outputs/apk/debug/app-debug.apk` after a successful build.
+Version `0.7.0-beta.4` requires Android 10 or newer and targets Android 16/API 36. Its permanent Android application ID is `io.github.noisetta.nikonpull`. The installable debug APK is at `app/build/outputs/apk/debug/app-debug.apk` after a successful build.
 
 ## Features
 
@@ -16,7 +16,7 @@ Version `0.7.0-beta.3` requires Android 10 or newer and targets Android 16/API 3
 - Keeps separate offline catalogs and thumbnail namespaces for each detected camera.
 - Browses JPEG, Nikon NEF/NRW, MPO/TIFF, MOV/MP4/AVI, and other standard PTP video formats.
 - Filters media by capture date and format.
-- Maintains a persistent, verified download queue with duplicate detection and reconnect retries.
+- Maintains a persistent, verified download queue with duplicate detection, reconnect retries, and chunk-boundary resume after interruptions or app restarts.
 - Uses `GetPartialObject` chunks for large files when the camera reports support, with full-object fallback for other cameras.
 - Saves photos under `Pictures/Nikon Pull` and videos under `Movies/Nikon Pull`.
 - Exports a compatibility report that omits serial numbers, filenames, and image contents.

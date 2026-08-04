@@ -86,6 +86,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var cachedCameraObjects: List<CameraObject> = emptyList()
     private val cacheLoadJob: Job
     private val connectionStateLock = Any()
+    private val downloadQueueStateLock = Any()
     private val thumbnailRequests = HashSet<Long>()
     private val mutableState = MutableStateFlow(
         AppState(
@@ -97,7 +98,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         cacheLoadJob = viewModelScope.launch(Dispatchers.IO) {
-            PhotoSaver.cleanupIncomplete(getApplication())
+            val queuedDownloads = downloadQueueStore.load()
+            val retainedPendingUris = queuedDownloads?.items.orEmpty()
+                .mapNotNull { it.pendingUri.takeIf(String::isNotBlank) }
+                .toSet()
+            PhotoSaver.cleanupIncomplete(getApplication(), retainedPendingUris)
             val cached = galleryCache.loadCatalog()
             if (cached != null) {
                 cachedCameraObjects = cached.objects
@@ -121,13 +126,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }
-            downloadQueueStore.load()?.takeIf { it.items.isNotEmpty() }?.let { queue ->
+            queuedDownloads?.takeIf { it.items.isNotEmpty() }?.let { queue ->
+                val savedBytes = queue.items.first().downloadedBytes
                 mutableState.update {
                     it.copy(
                         downloadQueueRemaining = queue.items.size,
                         downloadQueueTotal = queue.totalCount,
                         transferProgress = queue.overallProgress(),
-                        message = "${queue.items.size} queued downloads waiting for the camera",
+                        message = if (savedBytes > 0L) {
+                            "${queue.items.first().media.filename} is ${formatPercent(savedBytes, queue.items.first().media.size)} saved; waiting to resume"
+                        } else {
+                            "${queue.items.size} queued downloads waiting for the camera"
+                        },
                     )
                 }
             }
@@ -433,13 +443,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun cancelDownload() {
         if (mutableState.value.downloadQueueRemaining == 0 && transferJob?.isActive != true) return
-        transferCancellationRequested = true
-        downloadQueueStore.clear()
+        val pendingUris = synchronized(downloadQueueStateLock) {
+            transferCancellationRequested = true
+            val uris = downloadQueueStore.load()?.items.orEmpty()
+                .mapNotNull { it.pendingUri.takeIf(String::isNotBlank) }
+            downloadQueueStore.clear()
+            uris
+        }
         val job = transferJob?.takeIf(Job::isActive)
         if (job != null) {
             mutableState.update { it.copy(message = "Cancelling download queue…") }
             job.cancel()
             client?.let(::markConnectionLost)
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            pendingUris.forEach { PhotoSaver.discardIncomplete(getApplication(), it) }
         }
         mutableState.update {
             it.copy(
@@ -514,60 +532,130 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         while (queue.items.isNotEmpty()) {
             val cameraClient = client ?: return
             if (!mutableState.value.connected) return
-            val queued = queue.items.first()
+            var queued = queue.items.first()
             val media = queued.media
             val ordinal = queue.processedCount + 1
 
             if (PhotoSaver.isAlreadyDownloaded(getApplication(), media)) {
+                PhotoSaver.discardIncomplete(getApplication(), queued.pendingUri)
                 queue = queue.completeFirst(skipped = true)
                 persistQueueProgress(queue, "Already downloaded: ${media.filename}")
                 continue
             }
 
+            var pendingPhoto: PhotoSaver.PendingPhoto? = null
             try {
-                PhotoSaver.createPending(getApplication(), media).use { pendingPhoto ->
-                    cameraClient.downloadObject(media.handle, media.size, pendingPhoto.output) { progress ->
+                var resumeBytes = queued.downloadedBytes.coerceIn(0L, media.size.coerceAtLeast(0L))
+                var pendingUri = queued.pendingUri
+                if (resumeBytes > 0L) {
+                    if (pendingUri.isBlank()) {
+                        resumeBytes = 0L
+                    } else {
+                        val currentObject = cameraClient.getObjectInfo(media.handle)
+                        if (!currentObject.matchesResumeIdentity(media)) {
+                            throw IllegalStateException(
+                                "${media.filename} changed on the camera; refusing to resume the partial file",
+                            )
+                        }
+                        if (mutableState.value.cameraInfo?.supportsPartialObject != true) {
+                            PhotoSaver.discardIncomplete(getApplication(), pendingUri)
+                            pendingUri = ""
+                            resumeBytes = 0L
+                        }
+                    }
+                }
+
+                pendingPhoto = PhotoSaver.openPending(
+                    context = getApplication(),
+                    photo = media,
+                    pendingUri = pendingUri,
+                    resumeBytes = resumeBytes,
+                )
+                queue = queue.updateFirstResume(
+                    pendingUri = pendingPhoto.uri.toString(),
+                    downloadedBytes = pendingPhoto.bytesWritten,
+                )
+                queued = queue.items.first()
+                synchronized(downloadQueueStateLock) {
+                    if (transferCancellationRequested) throw CancellationException("Download cancelled")
+                    downloadQueueStore.save(queue)
+                }
+                val resumedFrom = pendingPhoto.bytesWritten
+
+                cameraClient.downloadObject(
+                    handle = media.handle,
+                    objectSize = media.size,
+                    destination = pendingPhoto.output,
+                    startOffset = resumedFrom,
+                    onChunkCompleted = { completedBytes ->
+                        synchronized(downloadQueueStateLock) {
+                            if (transferCancellationRequested) {
+                                throw CancellationException("Download cancelled")
+                            }
+                            pendingPhoto.checkpoint(completedBytes)
+                            queue = queue.updateFirstResume(
+                                pendingUri = pendingPhoto.uri.toString(),
+                                downloadedBytes = completedBytes,
+                                resetAttempts = true,
+                            )
+                            queued = queue.items.first()
+                            downloadQueueStore.save(queue)
+                        }
+                    },
+                    onProgress = { progress ->
                         val fileFraction = progress.totalBytes
                             ?.takeIf { it > 0L }
                             ?.let { progress.bytesTransferred.toFloat() / it.toFloat() }
                             ?.coerceIn(0f, 1f)
-                        val transferred = progress.bytesTransferred.coerceAtMost(media.size.coerceAtLeast(0L))
+                        val transferred = progress.bytesTransferred
+                            .coerceAtMost(media.size.coerceAtLeast(0L))
                         val overall = queue.overallProgress(transferred, fileFraction)
                         val percent = fileFraction?.times(100)?.roundToInt()?.coerceIn(0, 100)
                         mutableState.update {
                             it.copy(
                                 message = buildString {
-                                    append("Downloading $ordinal/${queue.totalCount}: ${media.filename}")
+                                    append(if (resumedFrom > 0L) "Resuming " else "Downloading ")
+                                    append("$ordinal/${queue.totalCount}: ${media.filename}")
                                     if (percent != null) append(" ($percent%)")
-                                    if (queued.attempts > 0) append(" • retry ${queued.attempts}/$MAX_DOWNLOAD_ATTEMPTS")
+                                    if (queued.attempts > 0) {
+                                        append(" • retry ${queued.attempts}/$MAX_DOWNLOAD_ATTEMPTS")
+                                    }
                                 },
                                 currentFileProgress = fileFraction,
                                 transferProgress = overall,
                             )
                         }
-                    }
-                    pendingPhoto.commit(media.size)
-                }
-                queue = queue.completeFirst(skipped = false)
-                persistQueueProgress(queue, "Verified ${media.filename}")
+                    },
+                )
+                pendingPhoto.commit(media.size)
             } catch (error: Throwable) {
                 if (error is CancellationException ||
                     transferCancellationRequested ||
                     !currentCoroutineContext().isActive
                 ) {
+                    pendingPhoto?.discard()
                     throw CancellationException("Download cancelled")
                 }
+                pendingPhoto?.close()
+                queued = queue.items.first()
                 val nextAttempt = queued.attempts + 1
                 val connectionFailure = error.isConnectionFailure()
                 val failureReason = friendlyMessage(error)
                 queue = if (nextAttempt >= MAX_DOWNLOAD_ATTEMPTS) {
+                    pendingPhoto?.discard()
+                        ?: PhotoSaver.discardIncomplete(getApplication(), queued.pendingUri)
                     queue.failFirst(failureReason)
                 } else {
                     queue.copy(
                         items = listOf(queued.copy(attempts = nextAttempt)) + queue.items.drop(1),
                     )
                 }
-                downloadQueueStore.save(queue)
+                synchronized(downloadQueueStateLock) {
+                    if (transferCancellationRequested) {
+                        throw CancellationException("Download cancelled")
+                    }
+                    downloadQueueStore.save(queue)
+                }
                 mutableState.update {
                     it.copy(
                         downloadQueueRemaining = queue.items.size,
@@ -591,13 +679,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return
                 }
                 if (nextAttempt < MAX_DOWNLOAD_ATTEMPTS) delay(DOWNLOAD_RETRY_DELAY_MS)
+                continue
+            } finally {
+                pendingPhoto?.close()
             }
+
+            queue = queue.completeFirst(skipped = false)
+            persistQueueProgress(queue, "Verified ${media.filename}")
         }
         finishDownloadQueue(queue)
     }
 
     private fun persistQueueProgress(queue: DownloadQueueSnapshot, message: String) {
-        downloadQueueStore.save(queue)
+        synchronized(downloadQueueStateLock) {
+            if (transferCancellationRequested) throw CancellationException("Download cancelled")
+            downloadQueueStore.save(queue)
+        }
         mutableState.update {
             it.copy(
                 downloadQueueRemaining = queue.items.size,
@@ -610,7 +707,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun finishDownloadQueue(queue: DownloadQueueSnapshot) {
-        downloadQueueStore.clear()
+        synchronized(downloadQueueStateLock) {
+            downloadQueueStore.clear()
+        }
         val summary = DownloadResultSummary(
             totalCount = queue.totalCount,
             downloadedCount = queue.downloadedCount,
@@ -654,20 +753,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    private fun DownloadQueueSnapshot.updateFirstResume(
+        pendingUri: String,
+        downloadedBytes: Long,
+        resetAttempts: Boolean = false,
+    ): DownloadQueueSnapshot {
+        val first = items.first()
+        return copy(
+            items = listOf(
+                first.copy(
+                    attempts = if (resetAttempts) 0 else first.attempts,
+                    pendingUri = pendingUri,
+                    downloadedBytes = downloadedBytes.coerceIn(
+                        0L,
+                        first.media.size.coerceAtLeast(0L),
+                    ),
+                ),
+            ) + items.drop(1),
+        )
+    }
+
     private fun DownloadQueueSnapshot.overallProgress(
-        currentBytes: Long = 0L,
+        currentBytes: Long? = null,
         currentFraction: Float? = null,
-    ): Float? = when {
-        totalBytes > 0L -> ((processedBytes + currentBytes).toDouble() / totalBytes.toDouble())
-            .toFloat()
-            .coerceIn(0f, 1f)
-        totalCount > 0 -> ((processedCount + (currentFraction ?: 0f)) / totalCount.toFloat())
-            .coerceIn(0f, 1f)
-        else -> null
+    ): Float? {
+        val activeBytes = currentBytes ?: items.firstOrNull()?.downloadedBytes ?: 0L
+        return when {
+            totalBytes > 0L -> ((processedBytes + activeBytes).toDouble() / totalBytes.toDouble())
+                .toFloat()
+                .coerceIn(0f, 1f)
+            totalCount > 0 -> ((processedCount + (currentFraction ?: 0f)) / totalCount.toFloat())
+                .coerceIn(0f, 1f)
+            else -> null
+        }
     }
 
     private fun CameraObject.downloadIdentity(): String =
         "$storageId|$handle|$filename|$size"
+
+    private fun CameraObject.matchesResumeIdentity(expected: CameraObject): Boolean =
+        storageId == expected.storageId &&
+            handle == expected.handle &&
+            format == expected.format &&
+            size == expected.size &&
+            filename == expected.filename &&
+            (captureDate.isBlank() || expected.captureDate.isBlank() || captureDate == expected.captureDate)
 
     fun requestThumbnail(photo: CameraObject) {
         val handle = photo.handle
@@ -895,6 +1025,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 append(if (otherCount == 1) " other object" else " other objects")
             }
         }
+    }
+
+    private fun formatPercent(bytes: Long, total: Long): String = if (total > 0L) {
+        "${((bytes.toDouble() / total.toDouble()) * 100).roundToInt().coerceIn(0, 100)}%"
+    } else {
+        "partially"
     }
 
     private suspend fun runWork(startMessage: String, block: suspend () -> Unit) {
