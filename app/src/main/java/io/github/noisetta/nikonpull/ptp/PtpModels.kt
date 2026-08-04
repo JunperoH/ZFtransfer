@@ -86,6 +86,7 @@ data class CameraDeviceInfo(
 
     val isBrowseCompatible: Boolean get() = missingRequiredOperations.isEmpty()
     val supportsThumbnail: Boolean get() = OP_GET_THUMB in operationsSupported
+    val supportsPartialObject: Boolean get() = OP_GET_PARTIAL_OBJECT in operationsSupported
 
     val stableIdentity: String
         get() = listOf(
@@ -100,6 +101,7 @@ data class CameraDeviceInfo(
         const val OP_GET_OBJECT_INFO = 0x1008
         const val OP_GET_OBJECT = 0x1009
         const val OP_GET_THUMB = 0x100A
+        const val OP_GET_PARTIAL_OBJECT = 0x101B
         val REQUIRED_OPERATIONS = setOf(
             OP_GET_STORAGE_IDS,
             OP_GET_OBJECT_HANDLES,

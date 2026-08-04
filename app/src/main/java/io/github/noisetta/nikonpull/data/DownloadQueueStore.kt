@@ -20,6 +20,7 @@ data class DownloadQueueSnapshot(
     val downloadedCount: Int = 0,
     val skippedCount: Int = 0,
     val failedFilenames: List<String> = emptyList(),
+    val failedDetails: List<String> = emptyList(),
 ) {
     val failedCount: Int get() = failedFilenames.size
     val processedCount: Int get() = downloadedCount + skippedCount + failedCount
@@ -66,6 +67,10 @@ class DownloadQueueStore(context: Context) {
         val failed = buildList(failedJson.length()) {
             for (index in 0 until failedJson.length()) add(failedJson.getString(index))
         }
+        val failedDetailsJson = root.optJSONArray("failedDetails") ?: JSONArray()
+        val failedDetails = buildList(failedDetailsJson.length()) {
+            for (index in 0 until failedDetailsJson.length()) add(failedDetailsJson.getString(index))
+        }
         DownloadQueueSnapshot(
             cameraIdentity = root.optString("cameraIdentity"),
             items = items,
@@ -75,6 +80,7 @@ class DownloadQueueStore(context: Context) {
             downloadedCount = root.optInt("downloadedCount"),
             skippedCount = root.optInt("skippedCount"),
             failedFilenames = failed,
+            failedDetails = failedDetails,
         )
     }.getOrNull()
 
@@ -98,6 +104,9 @@ class DownloadQueueStore(context: Context) {
         val failed = JSONArray().also { array ->
             snapshot.failedFilenames.forEach(array::put)
         }
+        val failedDetails = JSONArray().also { array ->
+            snapshot.failedDetails.forEach(array::put)
+        }
         val json = JSONObject()
             .put("version", VERSION)
             .put("cameraIdentity", snapshot.cameraIdentity)
@@ -107,6 +116,7 @@ class DownloadQueueStore(context: Context) {
             .put("downloadedCount", snapshot.downloadedCount)
             .put("skippedCount", snapshot.skippedCount)
             .put("failedFilenames", failed)
+            .put("failedDetails", failedDetails)
             .put("items", items)
             .toString()
         val temporary = File(directory, "$QUEUE_FILENAME.tmp")
@@ -124,7 +134,7 @@ class DownloadQueueStore(context: Context) {
     }
 
     private companion object {
-        const val VERSION = 2
+        const val VERSION = 3
         const val DIRECTORY = "downloads"
         const val QUEUE_FILENAME = "queue.json"
     }

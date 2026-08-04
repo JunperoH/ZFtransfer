@@ -177,6 +177,7 @@ private fun NikonPullScreen(viewModel: MainViewModel = viewModel()) {
             status = state.compatibilityStatus,
             connectedEndpoint = state.connectedEndpoint,
             supportsThumbnail = state.cameraInfo?.supportsThumbnail,
+            supportsPartialObject = state.cameraInfo?.supportsPartialObject,
             initialHost = state.manualCameraHost,
             initialPort = state.cameraPort,
             onSaveEndpoint = viewModel::saveCameraEndpoint,
@@ -343,6 +344,7 @@ private fun CameraCompatibilityDialog(
     status: String,
     connectedEndpoint: String,
     supportsThumbnail: Boolean?,
+    supportsPartialObject: Boolean?,
     initialHost: String,
     initialPort: Int,
     onSaveEndpoint: (String, String) -> Unit,
@@ -362,6 +364,12 @@ private fun CameraCompatibilityDialog(
                 if (connectedEndpoint.isNotBlank()) Text("Connected at $connectedEndpoint")
                 if (supportsThumbnail != null) {
                     Text("Camera thumbnails: ${if (supportsThumbnail) "supported" else "not reported"}")
+                }
+                if (supportsPartialObject != null) {
+                    Text(
+                        "Large-file chunks: " +
+                            if (supportsPartialObject) "supported" else "full-file fallback",
+                    )
                 }
                 Spacer(Modifier.height(16.dp))
                 Text("Connection endpoint", style = MaterialTheme.typography.titleSmall)
@@ -523,7 +531,8 @@ private fun DownloadSummaryDialog(
         append("Failed: ${summary.failedFilenames.size}")
         if (summary.failedFilenames.isNotEmpty()) {
             append("\n\nFailed files:\n")
-            append(summary.failedFilenames.take(8).joinToString("\n"))
+            val details = summary.failedDetails.ifEmpty { summary.failedFilenames }
+            append(details.take(8).joinToString("\n"))
             if (summary.failedFilenames.size > 8) {
                 append("\n…and ${summary.failedFilenames.size - 8} more")
             }

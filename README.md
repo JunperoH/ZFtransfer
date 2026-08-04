@@ -6,7 +6,7 @@ The Nikon D5300 is the first physically verified camera. Other cameras designed 
 
 ## Current test build
 
-Version `0.7.0-beta.2` requires Android 10 or newer and targets Android 16/API 36. Its permanent Android application ID is `io.github.noisetta.nikonpull`. The installable debug APK is at `app/build/outputs/apk/debug/app-debug.apk` after a successful build.
+Version `0.7.0-beta.3` requires Android 10 or newer and targets Android 16/API 36. Its permanent Android application ID is `io.github.noisetta.nikonpull`. The installable debug APK is at `app/build/outputs/apk/debug/app-debug.apk` after a successful build.
 
 ## Features
 
@@ -17,6 +17,7 @@ Version `0.7.0-beta.2` requires Android 10 or newer and targets Android 16/API 3
 - Browses JPEG, Nikon NEF/NRW, MPO/TIFF, MOV/MP4/AVI, and other standard PTP video formats.
 - Filters media by capture date and format.
 - Maintains a persistent, verified download queue with duplicate detection and reconnect retries.
+- Uses `GetPartialObject` chunks for large files when the camera reports support, with full-object fallback for other cameras.
 - Saves photos under `Pictures/Nikon Pull` and videos under `Movies/Nikon Pull`.
 - Exports a compatibility report that omits serial numbers, filenames, and image contents.
 
@@ -47,4 +48,4 @@ The GitHub Actions workflow runs tests, lint, debug APK assembly, and an unsigne
 
 ## Protocol notes
 
-The transport follows CIPA DC-X005 PTP/IP. Numeric fields are little-endian, command and event channels are initialized separately, camera data is copied in bounded chunks, and incomplete MediaStore items are deleted. The app treats `GetThumb` as optional but requires storage enumeration, object-handle enumeration, object metadata, and object download operations.
+The transport follows CIPA DC-X005 PTP/IP. Numeric fields are little-endian, command and event channels are initialized separately, and incomplete MediaStore items are deleted. Large originals use bounded `GetPartialObject` transactions when advertised by the camera; otherwise the app falls back to `GetObject`. The app treats `GetThumb` and `GetPartialObject` as optional but requires storage enumeration, object-handle enumeration, object metadata, and full-object download support.

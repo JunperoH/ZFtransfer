@@ -69,6 +69,7 @@ data class DownloadResultSummary(
     val downloadedCount: Int,
     val skippedCount: Int,
     val failedFilenames: List<String>,
+    val failedDetails: List<String>,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -355,6 +356,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
             appendLine("GetThumb: ${if (info?.supportsThumbnail == true) "yes" else "no/unknown"}")
             appendLine(
+                "GetPartialObject: " +
+                    if (info?.supportsPartialObject == true) "yes" else "no/unknown",
+            )
+            appendLine(
                 "Operations: " + info?.operationsSupported.orEmpty()
                     .sorted()
                     .joinToString { "0x${it.toString(16).uppercase()}" },
@@ -521,7 +526,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             try {
                 PhotoSaver.createPending(getApplication(), media).use { pendingPhoto ->
-                    cameraClient.downloadObject(media.handle, pendingPhoto.output) { progress ->
+                    cameraClient.downloadObject(media.handle, media.size, pendingPhoto.output) { progress ->
                         val fileFraction = progress.totalBytes
                             ?.takeIf { it > 0L }
                             ?.let { progress.bytesTransferred.toFloat() / it.toFloat() }
@@ -554,8 +559,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val nextAttempt = queued.attempts + 1
                 val connectionFailure = error.isConnectionFailure()
+                val failureReason = friendlyMessage(error)
                 queue = if (nextAttempt >= MAX_DOWNLOAD_ATTEMPTS) {
-                    queue.failFirst()
+                    queue.failFirst(failureReason)
                 } else {
                     queue.copy(
                         items = listOf(queued.copy(attempts = nextAttempt)) + queue.items.drop(1),
@@ -574,9 +580,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             connectionFailure ->
                                 "Camera disconnected; ${media.filename} failed after $MAX_DOWNLOAD_ATTEMPTS attempts"
                             nextAttempt < MAX_DOWNLOAD_ATTEMPTS ->
-                                "Retrying ${media.filename} ($nextAttempt/$MAX_DOWNLOAD_ATTEMPTS): ${friendlyMessage(error)}"
+                                "Retrying ${media.filename} ($nextAttempt/$MAX_DOWNLOAD_ATTEMPTS): $failureReason"
                             else ->
-                                "Skipped ${media.filename} after $MAX_DOWNLOAD_ATTEMPTS failed attempts"
+                                "Skipped ${media.filename} after $MAX_DOWNLOAD_ATTEMPTS attempts: $failureReason"
                         },
                     )
                 }
@@ -610,6 +616,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             downloadedCount = queue.downloadedCount,
             skippedCount = queue.skippedCount,
             failedFilenames = queue.failedFilenames,
+            failedDetails = queue.failedDetails,
         )
         mutableState.update {
             it.copy(
@@ -637,12 +644,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    private fun DownloadQueueSnapshot.failFirst(): DownloadQueueSnapshot {
+    private fun DownloadQueueSnapshot.failFirst(reason: String): DownloadQueueSnapshot {
         val media = items.first().media
         return copy(
             items = items.drop(1),
             processedBytes = processedBytes + media.size.coerceAtLeast(0L),
             failedFilenames = failedFilenames + media.filename,
+            failedDetails = failedDetails + "${media.filename}: $reason",
         )
     }
 
@@ -734,7 +742,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         return try {
             FileOutputStream(temporary).use { output ->
-                cameraClient.downloadObject(photo.handle, output)
+                cameraClient.downloadObject(photo.handle, photo.size, output)
             }
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(temporary.absolutePath, bounds)

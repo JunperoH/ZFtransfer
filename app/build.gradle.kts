@@ -14,8 +14,8 @@ android {
         applicationId = "io.github.noisetta.nikonpull"
         minSdk = 29
         targetSdk = 36
-        versionCode = 20
-        versionName = "0.7.0-beta.2"
+        versionCode = 21
+        versionName = "0.7.0-beta.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -29,6 +29,7 @@ class PtpIpClient(
     private val eventRunning = AtomicBoolean(false)
     private val nextTransactionId = AtomicLong(0)
     private var responderGuid: String = ""
+    private var supportsPartialObject = false
 
     @Synchronized
     fun connect() {
@@ -144,7 +145,7 @@ class PtpIpClient(
     fun getDeviceInfo(): CameraDeviceInfo = PtpDataParser.parseDeviceInfo(
         executeForBytes(OP_GET_DEVICE_INFO),
         responderGuid,
-    )
+    ).also { supportsPartialObject = it.supportsPartialObject }
 
     /** A harmless metadata request that keeps the Nikon PTP/IP session active. */
     fun ping() {
@@ -162,6 +163,70 @@ class PtpIpClient(
             destination = destination,
             onProgress = onProgress,
         )
+    }
+
+    /**
+     * Downloads large objects in bounded PTP transactions when the camera advertises
+     * GetPartialObject. This avoids keeping one Nikon command response open for the entire
+     * video, which some cameras abort even while their Wi-Fi connection remains healthy.
+     */
+    fun downloadObject(
+        handle: Long,
+        objectSize: Long,
+        destination: OutputStream,
+        onProgress: (TransferProgress) -> Unit = {},
+    ) {
+        if (supportsPartialObject && objectSize > PARTIAL_OBJECT_THRESHOLD_BYTES) {
+            downloadObjectInChunks(handle, objectSize, destination, onProgress)
+        } else {
+            downloadObject(handle, destination, onProgress)
+        }
+    }
+
+    @Synchronized
+    internal fun downloadObjectInChunks(
+        handle: Long,
+        objectSize: Long,
+        destination: OutputStream,
+        onProgress: (TransferProgress) -> Unit = {},
+        chunkSize: Int = PARTIAL_OBJECT_CHUNK_BYTES,
+    ) {
+        require(objectSize in 0..MAX_PARTIAL_OBJECT_SIZE) {
+            "GetPartialObject supports files up to $MAX_PARTIAL_OBJECT_SIZE bytes"
+        }
+        require(chunkSize > 0) { "Chunk size must be positive" }
+
+        var offset = 0L
+        onProgress(TransferProgress(0L, objectSize))
+        while (offset < objectSize) {
+            val requested = minOf(chunkSize.toLong(), objectSize - offset)
+            val chunkOffset = offset
+            val received = execute(
+                operationCode = OP_GET_PARTIAL_OBJECT,
+                parameters = listOf(handle, chunkOffset, requested),
+                destination = destination,
+            ) { progress ->
+                onProgress(
+                    TransferProgress(
+                        bytesTransferred = chunkOffset + progress.bytesTransferred,
+                        totalBytes = objectSize,
+                    ),
+                )
+            }
+            if (received <= 0L) {
+                throw PtpException(
+                    "Camera returned no data at byte $offset of $objectSize",
+                )
+            }
+            if (received > requested) {
+                throw PtpException(
+                    "Camera returned $received bytes for a $requested-byte partial request",
+                )
+            }
+            offset += received
+            onProgress(TransferProgress(offset, objectSize))
+        }
+        destination.flush()
     }
 
     @Synchronized
@@ -182,7 +247,7 @@ class PtpIpClient(
         transactionId: Long = nextTransactionId.incrementAndGet(),
         destination: OutputStream? = null,
         onProgress: (TransferProgress) -> Unit = {},
-    ) {
+    ): Long {
         checkConnected()
         val request = operationRequestPayload(operationCode, transactionId, parameters)
         sendCommandPacket(TYPE_OPERATION_REQUEST, request)
@@ -242,7 +307,7 @@ class PtpIpClient(
                     }
                     destination?.flush()
                     onProgress(TransferProgress(bytesTransferred, expectedLength))
-                    return
+                    return bytesTransferred
                 }
 
                 TYPE_CANCEL -> throw PtpException("Camera cancelled the transfer")
@@ -273,7 +338,10 @@ class PtpIpClient(
                 } catch (_: SocketTimeoutException) {
                     // Periodically wake so close() can stop this thread.
                 } catch (_: Throwable) {
-                    if (eventRunning.get()) closeSockets()
+                    // Some Nikon cameras close an otherwise idle event channel during a long
+                    // GetObject transfer. The command channel is independent and may still be
+                    // actively delivering the file, so losing events must not abort it.
+                    if (eventRunning.get()) closeEventChannel()
                     return@thread
                 }
             }
@@ -407,15 +475,21 @@ class PtpIpClient(
         closeSockets()
     }
 
-    private fun closeSockets() {
+    @Synchronized
+    private fun closeEventChannel() {
         eventRunning.set(false)
-        runCatching { eventSocket?.close() }
-        runCatching { commandSocket?.close() }
+        val socket = eventSocket
         eventSocket = null
+        eventThread = null
+        runCatching { socket?.close() }
+    }
+
+    private fun closeSockets() {
+        closeEventChannel()
+        runCatching { commandSocket?.close() }
         commandSocket = null
         commandInput = null
         commandOutput = null
-        eventThread = null
     }
 
     private data class PacketHeader(val type: Int, val payloadLength: Long)
@@ -472,6 +546,7 @@ class PtpIpClient(
         private const val OP_GET_OBJECT_INFO = 0x1008
         private const val OP_GET_OBJECT = 0x1009
         private const val OP_GET_THUMB = 0x100A
+        private const val OP_GET_PARTIAL_OBJECT = 0x101B
 
         private const val CONNECT_TIMEOUT_MS = 8_000
         private const val COMMAND_TIMEOUT_MS = 60_000
@@ -482,5 +557,8 @@ class PtpIpClient(
         private const val MAX_METADATA_BYTES = 32 * 1024 * 1024
         private const val MAX_SMALL_PACKET_BYTES = 64 * 1024
         private const val MAX_PACKET_BYTES = 2L * 1024 * 1024 * 1024
+        private const val PARTIAL_OBJECT_THRESHOLD_BYTES = 8L * 1024 * 1024
+        private const val PARTIAL_OBJECT_CHUNK_BYTES = 4 * 1024 * 1024
+        private const val MAX_PARTIAL_OBJECT_SIZE = 0xffff_ffffL
     }
 }
