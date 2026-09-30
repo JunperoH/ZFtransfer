@@ -1,29 +1,14 @@
-# Release Checklist
+# 发布前检查
 
-## Shared preparation
+本仓库目前提供实验性 Debug 构建，尚未配置公开发行签名。GitHub Actions 的调试 APK 使用 CI 环境生成的签名，不保证与开发者本机 APK 可互相覆盖安装。不要把本地调试密钥提交到仓库。
 
-- Confirm the application ID and public display name before the first store release; changing the application ID later creates a separate app.
-- Build from a clean checkout using the checked-in Gradle wrapper.
-- Run `./gradlew testDebugUnitTest lintDebug assembleDebug bundleRelease`.
-- Update `versionCode`, `versionName`, changelog, privacy policy, compatibility matrix, and screenshots.
-- Tag the exact release commit as `v<versionName>`.
-- Verify the tag builds without local-only files or credentials.
-- Keep signing keys and passwords outside the repository and maintain encrypted backups.
+## GitHub 源码与测试构建
 
-## Google Play
+1. 从干净检出的仓库运行 `./gradlew testDebugUnitTest lintDebug assembleDebug bundleRelease`。
+2. 检查 README、兼容性、隐私说明、版本号和测试记录是否与实际功能一致。
+3. 确认 `git status` 中没有 APK、日志、相机照片、签名文件或本地 SDK 配置。
+4. 对将公开分享的 APK，核对包名、版本、签名证书指纹和 SHA-256；标明它是实验构建。
 
-- Target the API level required on the intended submission date. New submissions require API 36 beginning August 31, 2026.
-- Generate a signed Android App Bundle and configure Play App Signing with a separate upload key.
-- Host `PRIVACY.md` at a stable public HTTPS URL and complete the Data Safety declaration, including a declaration that the app does not collect or share user data.
-- Complete content rating, app access, target audience, store listing, screenshots, icon, and feature graphic.
-- For applicable new personal accounts, complete the required closed test before requesting production access.
+## 正式发布
 
-## F-Droid
-
-- Keep the complete source in a public Git repository with `LICENSE` and version tags.
-- Ensure every runtime and build dependency is free/open-source and version-pinned.
-- Keep the F-Droid build free of proprietary services and SDKs.
-- Maintain Fastlane-compatible metadata under `fastlane/metadata/android/en-US`.
-- Test the release build from a clean source archive, then submit metadata to `fdroiddata` or open a Request for Packaging.
-
-F-Droid normally signs its build with a different key, so users may be unable to switch an installed app directly between Google Play and F-Droid. Reproducible upstream-signed builds can address this later but require additional release infrastructure.
+正式发布需要稳定、单独保管的发布密钥与独立的发布流程。更新版本号与变更记录，验证从上一版覆盖安装和数据保留，再制作 GitHub Release。应用商店上架另需维护各商店要求的图标、截图、说明与签名配置；旧版上游商店资料不适用于这个 Zf 分支。

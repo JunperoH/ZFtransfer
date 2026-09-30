@@ -1,1 +1,0 @@
-Adopts the permanent io.github.noisetta.nikonpull application ID before the first store release. Functionality is unchanged from beta 1.

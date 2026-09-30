@@ -1,1 +1,0 @@
-Resumes interrupted large-file downloads from the last verified PTP chunk, including after camera reconnects or app restarts. Queue cancellation safely removes incomplete MediaStore files.

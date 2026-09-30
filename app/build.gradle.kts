@@ -11,11 +11,11 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "io.github.noisetta.nikonpull"
+        applicationId = "io.github.noisetta.nikonpull.zflab"
         minSdk = 29
         targetSdk = 36
-        versionCode = 22
-        versionName = "0.7.0-beta.4"
+        versionCode = 12
+        versionName = "0.3.5-zf-lab"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -51,6 +51,7 @@ kotlin {
 }
 
 dependencies {
+    implementation("androidx.core:core:1.13.1")
     implementation(platform("androidx.compose:compose-bom:2025.05.01"))
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.compose.foundation:foundation")

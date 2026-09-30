@@ -1,11 +1,11 @@
 <resources>
-    <style name="Theme.NikonPull" parent="android:style/Theme.Material.Light.NoActionBar">
+    <style name="Theme.NikonPull" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowActionModeOverlay">true</item>
-        <item name="android:statusBarColor">#FFF8F6</item>
-        <item name="android:navigationBarColor">#FFF8F6</item>
-        <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:statusBarColor">#111310</item>
+        <item name="android:navigationBarColor">#111310</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
     </style>
 </resources>
 

@@ -14,6 +14,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "NikonPull"
+rootProject.name = "ZfTransfer"
 include(":app")
 

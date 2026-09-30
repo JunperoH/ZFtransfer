@@ -13,3 +13,14 @@ captures/
 *.keystore
 keystore.properties
 release-secrets.properties
+.android/
+.local/
+analytics.settings
+emulator-*.png
+emulator*.log
+tools/__pycache__/
+*.hprof
+*.p12
+*.pfx
+.env
+.env.*

@@ -1,9 +1,0 @@
-Nikon Pull is an unofficial, open-source utility for compatible Nikon cameras that use the legacy Wireless Mobile Utility (WMU) Wi-Fi transport.
-
-Browse an offline camera catalog, filter photos and videos by date or format, preview thumbnails, and download original files without re-encoding them. A persistent transfer queue verifies file sizes, skips existing downloads, and retries after camera Wi-Fi interruptions.
-
-The Nikon D5300 is physically verified. Other WMU cameras are detected through their standard PTP capabilities and are clearly identified as awaiting hardware verification. SnapBridge-only cameras are not currently supported.
-
-The app has no ads, analytics, accounts, telemetry, or developer-operated online service. Camera communication remains on the local Wi-Fi network.
-
-Nikon Pull is independent and is not affiliated with or endorsed by Nikon Corporation.

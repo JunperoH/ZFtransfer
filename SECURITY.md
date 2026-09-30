@@ -1,15 +1,7 @@
-# Security Policy
+# 安全问题反馈
 
-## Supported versions
+实验版仅维护最新发布的版本。若发现安全问题，请优先使用 GitHub 仓库的私密漏洞报告功能；若尚未启用，可先开一个不含利用细节的 Issue 请求私密联系方式。
 
-Only the latest published version is supported during the public beta.
+请提供应用版本、Android 版本、相机型号、影响与使用合成数据复现的步骤。不要公开相机序列号、Wi-Fi 凭据、私人照片、未脱敏日志或含个人信息的抓包。
 
-## Reporting a vulnerability
-
-Do not publish camera identifiers, private media, Wi-Fi credentials, or proof-of-concept files containing personal data. Once the public repository exists, use its private vulnerability-reporting feature when available. Otherwise, open a minimal issue requesting a private contact channel without including exploit details.
-
-Reports should include the affected app version, Android version, camera model, impact, and reproducible steps using synthetic or redacted data.
-
-## Security boundaries
-
-Nikon Pull communicates with a camera over an isolated local Wi-Fi network using unencrypted PTP/IP, as provided by the camera. Users should disconnect from the camera network after transfers and should not reuse camera Wi-Fi credentials for other services. The app does not expose a network listener or upload media to a developer-operated server.
+相机提供的 PTP/IP 通道本身不加密。建议只在受信任的本地网络或相机热点中使用，传输完毕后断开相机连接。应用不监听外部连接，也不向开发者服务器上传媒体。

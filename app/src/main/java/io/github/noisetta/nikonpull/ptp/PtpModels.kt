@@ -111,7 +111,11 @@ data class CameraDeviceInfo(
     }
 }
 
-class PtpException(message: String, cause: Throwable? = null) : Exception(message, cause)
+open class PtpException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
+class PtpInitRejectedException(val reason: Int) : PtpException(
+    "Camera rejected the PTP/IP init command (reason 0x${reason.toUInt().toString(16).uppercase()})",
+)
 
 data class TransferProgress(
     val bytesTransferred: Long,

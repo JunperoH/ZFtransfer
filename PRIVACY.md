@@ -1,38 +1,11 @@
-# Privacy Policy
+# 隐私说明
 
-Effective date: August 3, 2026
+Zf 传图是非官方开源应用，用于通过本地 Wi-Fi 浏览和下载相机文件。应用没有账号、广告、分析 SDK、遥测或开发者运营的服务器。`INTERNET` 权限用于与局域网相机进行 PTP/IP 通信；蓝牙权限仅用于实验性扫描、配对和连接。
 
-Nikon Pull is an unofficial, open-source application for browsing and downloading media from compatible cameras over a local Wi-Fi connection.
+应用在设备本地保存相机目录缓存、缩略图、连接设置、客户端标识、下载队列与诊断日志。默认下载位置为 `Pictures/Zf AP Transfer` 和 `Movies/Zf AP Transfer`；用户也可通过 Android 系统文件夹选择器指定目录。卸载应用会删除应用私有数据，已保存到共享存储的原图可能仍保留。
 
-## Data collection and sharing
+应用不会自动把照片或日志发给开发者。用户可以主动通过 Android 分享界面导出兼容性报告或诊断日志。报告包含设备与相机型号、固件、连接方式和协议能力；诊断日志还可能包含本地 IP、文件名、对象编号和错误。分享前请检查内容，接收方的隐私规则由接收方负责。
 
-Nikon Pull does not collect, transmit, sell, or share personal data with its developer. The app contains no analytics, advertising, telemetry, account system, or developer-operated network service.
+隐私相关问题可通过此项目的 GitHub Issue 提交；请勿在公开 Issue 中附上个人信息或原始日志。本项目没有服务器端账号或数据库需要删除。
 
-The Android `INTERNET` permission is used only to communicate directly with a camera on the local Wi-Fi network using PTP/IP. The app does not contact an internet server.
-
-## Data stored on the device
-
-The app stores the following locally:
-
-- Camera media catalogs and preview thumbnails, separated by detected camera.
-- Connection preferences, an app-generated PTP/IP client identifier, and cache settings.
-- A pending download queue and transfer results.
-- Originals explicitly downloaded by the user under `Pictures/Nikon Pull` or `Movies/Nikon Pull` through Android MediaStore.
-
-Preview caches can be cleared from the app. Uninstalling the app removes its private catalogs, settings, and queues, but Android may retain originals that the user downloaded into shared media storage.
-
-## Compatibility reports
-
-The user can explicitly invoke Android's share sheet to send a compatibility report to a destination they choose. The report includes app and Android versions, phone manufacturer/model, detected camera model and firmware, PTP capabilities, endpoint mode, and aggregate media counts. It intentionally omits camera serial numbers, media filenames, image contents, and downloaded files.
-
-After the user chooses another app or service to receive a report, that recipient's privacy practices apply.
-
-## Contact
-
-Privacy questions and deletion concerns can be submitted through the project's public issue tracker once the source repository is published. Because Nikon Pull has no developer-operated service or account database, there is no remotely held user data to delete.
-
-## Changes
-
-Material changes to this policy will be documented in the source repository and shipped with the corresponding app release.
-
-Nikon is a trademark of Nikon Corporation. Nikon Pull is not affiliated with or endorsed by Nikon Corporation.
+本项目与尼康公司无关联，见 [商标说明](TRADEMARKS.md)。

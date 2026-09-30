@@ -6,8 +6,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: Nikon Pull version
-      placeholder: 0.6.0-compatibility
+      label: Zf 传图版本
+      placeholder: 0.3.5-zf-lab
     validations:
       required: true
   - type: input
@@ -20,6 +20,16 @@ body:
     id: camera
     attributes:
       label: Camera model
+      placeholder: Nikon Zf, firmware 3.00
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Connection mode
+      options:
+        - Wi-Fi AP
+        - Wi-Fi STA
+        - Bluetooth experiment
+        - Offline gallery or settings
   - type: textarea
     id: steps
     attributes:

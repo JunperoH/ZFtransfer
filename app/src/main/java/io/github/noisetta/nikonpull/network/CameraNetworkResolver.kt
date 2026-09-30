@@ -56,6 +56,7 @@ object CameraNetworkResolver {
             val route = connectivityManager.getLinkProperties(network)
                 ?.let(::routeFrom)
                 ?: return@mapNotNull null
+            if (manualHost == null && route.gatewayAddress.isBlank()) return@mapNotNull null
             CameraNetworkLease(
                 network = network,
                 phoneAddress = route.phoneAddress,
@@ -80,7 +81,7 @@ object CameraNetworkResolver {
             .filterNot { it.isAnyLocalAddress }
             .mapNotNull { it.hostAddress }
             .firstOrNull()
-            ?: return null
+            .orEmpty()
 
         return Route(phoneAddress, gatewayAddress)
     }

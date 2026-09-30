@@ -10,25 +10,25 @@ body:
     id: camera
     attributes:
       label: Camera model
-      placeholder: Nikon D5300
+      placeholder: Nikon Zf, firmware 3.00
     validations:
       required: true
   - type: dropdown
     id: wifi
     attributes:
-      label: Wi-Fi method
+      label: Connection method
       options:
-        - Built-in Wi-Fi
-        - WU-1a adapter
-        - WU-1b adapter
+        - Wi-Fi AP
+        - Wi-Fi STA
+        - Bluetooth experiment
         - Other or unknown
     validations:
       required: true
   - type: textarea
     id: report
     attributes:
-      label: Privacy-safe compatibility report
-      description: Paste the text produced by Camera → Share privacy-safe compatibility report.
+      label: Privacy-checked compatibility report
+      description: Paste the app's compatibility report after checking device identifiers and local network details.
       render: text
     validations:
       required: true

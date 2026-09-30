@@ -1,5 +1,6 @@
 package io.github.noisetta.nikonpull.ptp
 
+import io.github.noisetta.nikonpull.diagnostics.DiagnosticLog
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
@@ -35,23 +36,31 @@ class PtpIpClient(
     fun connect() {
         close()
         var stage = "opening the command socket"
+        DiagnosticLog.info("PTP", "connect start endpoint=$host:$cameraPort")
 
         try {
             val command = openSocket(COMMAND_TIMEOUT_MS)
+            DiagnosticLog.info("PTP", "command socket open")
             commandSocket = command
             commandInput = BufferedInputStream(command.getInputStream(), IO_BUFFER_SIZE)
             commandOutput = BufferedOutputStream(command.getOutputStream(), IO_BUFFER_SIZE)
 
             sendCommandPacket(TYPE_INIT_COMMAND_REQUEST, initCommandPayload())
+            DiagnosticLog.info("PTP", "InitCommandRequest sent")
             stage = "waiting for the Nikon command acknowledgement"
             val commandAck = readSmallPacket(commandInput())
             if (commandAck.type == TYPE_INIT_FAIL) {
-                throw PtpException("The camera rejected this phone. Disable and re-enable camera Wi-Fi, then try again.")
+                val reason = commandAck.payload.takeIf { it.size >= 4 }?.littleEndianBuffer()?.int
+                DiagnosticLog.warn("PTP", "InitFail reason=${reason?.let { "0x${it.toUInt().toString(16).uppercase()}" } ?: "missing"}")
+                if (reason != null) throw PtpInitRejectedException(reason)
+                throw PtpException("Camera rejected the PTP/IP init command without a reason code")
             }
             if (commandAck.type != TYPE_INIT_COMMAND_ACK || commandAck.payload.size < 4) {
+                DiagnosticLog.warn("PTP", "unexpected init packet type=${commandAck.type} bytes=${commandAck.payload.size}")
                 throw PtpException("Camera returned an invalid PTP/IP connection response")
             }
             val connectionNumber = commandAck.payload.littleEndianBuffer().int
+            DiagnosticLog.info("PTP", "InitCommandAck connection=$connectionNumber")
             responderGuid = commandAck.payload
                 .takeIf { it.size >= 20 }
                 ?.copyOfRange(4, 20)
@@ -60,6 +69,7 @@ class PtpIpClient(
 
             stage = "opening the event socket"
             val event = openSocket(COMMAND_TIMEOUT_MS)
+            DiagnosticLog.info("PTP", "event socket open")
             eventSocket = event
             val eventInput = BufferedInputStream(event.getInputStream(), EVENT_BUFFER_SIZE)
             val eventOutput = BufferedOutputStream(event.getOutputStream(), EVENT_BUFFER_SIZE)
@@ -73,8 +83,10 @@ class PtpIpClient(
             stage = "waiting for the Nikon event acknowledgement"
             val eventAck = readSmallPacket(eventInput)
             if (eventAck.type != TYPE_INIT_EVENT_ACK) {
+                DiagnosticLog.warn("PTP", "unexpected event init packet type=${eventAck.type}")
                 throw PtpException("Camera event channel could not be initialized")
             }
+            DiagnosticLog.info("PTP", "InitEventAck received")
             event.soTimeout = EVENT_READ_TIMEOUT_MS
             startEventLoop(eventInput, eventOutput)
 
@@ -85,8 +97,10 @@ class PtpIpClient(
                 parameters = listOf(SESSION_ID),
                 transactionId = 0,
             )
+            DiagnosticLog.info("PTP", "session open")
         } catch (error: Throwable) {
             closeSockets()
+            DiagnosticLog.error("PTP", "connect failed stage=$stage endpoint=$host:$cameraPort", error)
             if (error is PtpException) throw error
             val cause = generateSequence(error) { it.cause }.last()
             val causeName = cause::class.simpleName ?: "network error"
@@ -96,6 +110,22 @@ class PtpIpClient(
                 error,
             )
         }
+    }
+
+    /** Complete first-time Nikon STA registration while the camera advertises apps=NSPP. */
+    fun registerStaClient() {
+        val payload = executeForBytes(OP_GET_PTPIP_PAIRING_CODE, maximumSize = 64)
+        if (payload.size < 5) throw PtpException("Zf did not return a STA pairing code")
+        val reader = payload.littleEndianBuffer()
+        val digits = reader.int
+        if (digits !in 1..8 || payload.size != 4 + digits ||
+            payload.drop(4).any { it.toInt() !in 0..9 }
+        ) {
+            throw PtpException("Zf returned an invalid STA pairing code")
+        }
+        DiagnosticLog.info("STA", "camera pairing code received; completing registration")
+        execute(OP_COMPLETE_PAIRING, parameters = listOf(RESPONSE_OK.toLong()))
+        DiagnosticLog.info("STA", "registration accepted; waiting for camera J confirmation")
     }
 
     fun listObjectHandles(): List<Long> {
@@ -273,6 +303,14 @@ class PtpIpClient(
         onProgress: (TransferProgress) -> Unit = {},
     ): Long {
         checkConnected()
+        val startedAt = System.nanoTime()
+        val logOperation = operationCode != OP_GET_DEVICE_INFO || transactionId <= 1
+        if (logOperation) {
+            DiagnosticLog.info(
+                "PTP",
+                "request op=0x${operationCode.toString(16).uppercase()} tx=$transactionId params=${parameters.joinToString(",")}",
+            )
+        }
         val request = operationRequestPayload(operationCode, transactionId, parameters)
         sendCommandPacket(TYPE_OPERATION_REQUEST, request)
 
@@ -316,6 +354,11 @@ class PtpIpClient(
                     val responseCode = reader.u16()
                     requireTransaction(reader.u32(), transactionId)
                     if (responseCode != RESPONSE_OK) {
+                        DiagnosticLog.warn(
+                            "PTP",
+                            "response error op=0x${operationCode.toString(16).uppercase()} " +
+                                "tx=$transactionId code=0x${responseCode.toString(16).uppercase()}",
+                        )
                         throw PtpException(
                             "Camera returned PTP error 0x${responseCode.toString(16).uppercase()} " +
                                 "for operation 0x${operationCode.toString(16).uppercase()}",
@@ -331,6 +374,13 @@ class PtpIpClient(
                     }
                     destination?.flush()
                     onProgress(TransferProgress(bytesTransferred, expectedLength))
+                    if (logOperation) {
+                        DiagnosticLog.info(
+                            "PTP",
+                            "response ok op=0x${operationCode.toString(16).uppercase()} " +
+                                "tx=$transactionId bytes=$bytesTransferred ms=${(System.nanoTime() - startedAt) / 1_000_000}",
+                        )
+                    }
                     return bytesTransferred
                 }
 
@@ -361,10 +411,11 @@ class PtpIpClient(
                     }
                 } catch (_: SocketTimeoutException) {
                     // Periodically wake so close() can stop this thread.
-                } catch (_: Throwable) {
+                } catch (error: Throwable) {
                     // Some Nikon cameras close an otherwise idle event channel during a long
                     // GetObject transfer. The command channel is independent and may still be
                     // actively delivering the file, so losing events must not abort it.
+                    if (eventRunning.get()) DiagnosticLog.warn("PTP", "event channel ended", error)
                     if (eventRunning.get()) closeEventChannel()
                     return@thread
                 }
@@ -496,6 +547,7 @@ class PtpIpClient(
 
     /** Immediately tears down a broken session without attempting a PTP close handshake. */
     fun abort() {
+        DiagnosticLog.warn("PTP", "session aborted")
         closeSockets()
     }
 
@@ -571,6 +623,8 @@ class PtpIpClient(
         private const val OP_GET_OBJECT = 0x1009
         private const val OP_GET_THUMB = 0x100A
         private const val OP_GET_PARTIAL_OBJECT = 0x101B
+        private const val OP_GET_PTPIP_PAIRING_CODE = 0x952B
+        private const val OP_COMPLETE_PAIRING = 0x935A
 
         private const val CONNECT_TIMEOUT_MS = 8_000
         private const val COMMAND_TIMEOUT_MS = 60_000

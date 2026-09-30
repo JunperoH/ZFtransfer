@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.PowerManager
@@ -11,17 +12,23 @@ import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.noisetta.nikonpull.BuildConfig
+import io.github.noisetta.nikonpull.bluetooth.NikonBleController
 import io.github.noisetta.nikonpull.data.CameraEndpointSettings
+import io.github.noisetta.nikonpull.data.CameraConnectionMode
 import io.github.noisetta.nikonpull.data.CameraSettings
 import io.github.noisetta.nikonpull.data.GalleryCache
 import io.github.noisetta.nikonpull.data.DownloadQueueSnapshot
 import io.github.noisetta.nikonpull.data.DownloadQueueStore
+import io.github.noisetta.nikonpull.data.DownloadLocation
 import io.github.noisetta.nikonpull.data.PhotoSaver
+import io.github.noisetta.nikonpull.diagnostics.DiagnosticLog
 import io.github.noisetta.nikonpull.network.CameraNetworkLease
 import io.github.noisetta.nikonpull.network.CameraNetworkResolver
+import io.github.noisetta.nikonpull.network.StaCameraDiscovery
 import io.github.noisetta.nikonpull.ptp.CameraDeviceInfo
 import io.github.noisetta.nikonpull.ptp.CameraObject
 import io.github.noisetta.nikonpull.ptp.PtpException
+import io.github.noisetta.nikonpull.ptp.PtpInitRejectedException
 import io.github.noisetta.nikonpull.ptp.PtpIpClient
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -42,12 +49,14 @@ import kotlin.math.roundToInt
 data class AppState(
     val connected: Boolean = false,
     val busy: Boolean = false,
-    val message: String = "Enable Wi-Fi on a Nikon WMU camera, then connect this phone to its network.",
-    val cameraName: String = "Nikon WMU camera",
+    val message: String = "选择连接模式后，点“连接”浏览相机照片。",
+    val cameraName: String = "Nikon Zf（待连接）",
     val cameraInfo: CameraDeviceInfo? = null,
-    val compatibilityStatus: String = "Not checked",
+    val compatibilityStatus: String = "尚未检查",
     val connectedEndpoint: String = "",
     val manualCameraHost: String = "",
+    val connectionMode: CameraConnectionMode = CameraConnectionMode.AP,
+    val staFirstRegistration: Boolean = false,
     val cameraPort: Int = PtpIpClient.DEFAULT_PORT,
     val librarySummary: String = "",
     val photos: List<CameraObject> = emptyList(),
@@ -62,6 +71,7 @@ data class AppState(
     val lastSyncedAtMillis: Long = 0L,
     val thumbnailCacheBytes: Long = 0L,
     val thumbnailCacheLimitBytes: Long = GalleryCache.DEFAULT_LIMIT_MB * 1024L * 1024L,
+    val downloadLocationLabel: String = DownloadLocation.DEFAULT_LABEL,
 )
 
 data class DownloadResultSummary(
@@ -73,15 +83,20 @@ data class DownloadResultSummary(
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
+    private val bleController = NikonBleController(application)
+    val bleState = bleController.state
     private var client: PtpIpClient? = null
     private var networkLease: CameraNetworkLease? = null
     private var connectionJob: Job? = null
     private var autoConnectJob: Job? = null
     private var transferJob: Job? = null
+    @Volatile private var reconnectWhenForeground = false
+    @Volatile private var appForeground = true
     @Volatile private var transferCancellationRequested = false
     private val galleryCache = GalleryCache(application)
     private val cameraSettings = CameraSettings(application)
     private val downloadQueueStore = DownloadQueueStore(application)
+    private val downloadLocation = DownloadLocation(application)
     private var currentCameraIdentity: String = ""
     private var cachedCameraObjects: List<CameraObject> = emptyList()
     private val cacheLoadJob: Job
@@ -91,12 +106,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val mutableState = MutableStateFlow(
         AppState(
             manualCameraHost = cameraSettings.endpoint.host,
+            connectionMode = cameraSettings.endpoint.mode,
             cameraPort = cameraSettings.endpoint.port,
+            downloadLocationLabel = downloadLocation.label,
         ),
     )
     val state = mutableState.asStateFlow()
 
+    fun chooseDownloadFolder(uri: Uri): Boolean {
+        if (mutableState.value.downloadQueueRemaining > 0 || transferJob?.isActive == true ||
+            downloadQueueStore.load()?.items?.isNotEmpty() == true) return false
+        return runCatching {
+            downloadLocation.save(getApplication(), uri)
+            mutableState.update { it.copy(downloadLocationLabel = downloadLocation.label) }
+            DiagnosticLog.info("STORAGE", "custom download folder selected")
+            true
+        }.getOrElse { error ->
+            DiagnosticLog.error("STORAGE", "could not select download folder", error)
+            false
+        }
+    }
+
+    fun resetDownloadFolder(): Boolean {
+        if (mutableState.value.downloadQueueRemaining > 0 || transferJob?.isActive == true ||
+            downloadQueueStore.load()?.items?.isNotEmpty() == true) return false
+        downloadLocation.reset()
+        mutableState.update { it.copy(downloadLocationLabel = downloadLocation.label) }
+        DiagnosticLog.info("STORAGE", "default download folder selected")
+        return true
+    }
+
     init {
+        DiagnosticLog.info(
+            "STATE",
+            "view model ready mode=${cameraSettings.endpoint.mode} endpointMode=${if (cameraSettings.endpoint.host.isBlank()) "auto" else "manual"} " +
+                "port=${cameraSettings.endpoint.port}",
+        )
         cacheLoadJob = viewModelScope.launch(Dispatchers.IO) {
             val queuedDownloads = downloadQueueStore.load()
             val retainedPendingUris = queuedDownloads?.items.orEmpty()
@@ -104,6 +149,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .toSet()
             PhotoSaver.cleanupIncomplete(getApplication(), retainedPendingUris)
             val cached = galleryCache.loadCatalog()
+            DiagnosticLog.info(
+                "CACHE",
+                "catalogObjects=${cached?.objects?.size ?: 0} queued=${queuedDownloads?.items?.size ?: 0}",
+            )
             if (cached != null) {
                 cachedCameraObjects = cached.objects
                 val media = cached.objects.filter { it.isPhoto || it.isVideo }
@@ -112,7 +161,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(
                         photos = media,
                         librarySummary = summary,
-                        message = "Cached gallery available",
+                        message = "已载入缓存照片，可离线选择",
                         lastSyncedAtMillis = cached.syncedAtMillis,
                         thumbnailCacheBytes = galleryCache.thumbnailUsageBytes(),
                         thumbnailCacheLimitBytes = galleryCache.thumbnailLimitBytes,
@@ -146,6 +195,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun connect() {
         if (mutableState.value.connected || connectionJob?.isActive == true) return
+        DiagnosticLog.info("CONNECT", "user requested connection")
         connectionJob = viewModelScope.launch(Dispatchers.IO) {
             cacheLoadJob.join()
             runCatching { client?.close() }
@@ -158,10 +208,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 var connectedDevice: CameraDeviceInfo? = null
                 var connectedEndpoint = ""
                 val endpointSettings = cameraSettings.endpoint
+                val discoveredSta = if (endpointSettings.mode == CameraConnectionMode.STA && endpointSettings.host.isBlank()) {
+                    mutableState.update { it.copy(message = "正在当前 Wi-Fi 中搜索 Zf…") }
+                    StaCameraDiscovery.discover(getApplication())
+                        ?: throw PtpException("No PTP/IP camera found on this Wi-Fi network. Enter the Zf IPv4 address in Camera settings.")
+                } else null
+                val targetHost = endpointSettings.host.ifBlank { discoveredSta?.host.orEmpty() }
+                val targetPort = discoveredSta?.port ?: endpointSettings.port
                 for (attempt in 1..CONNECTION_ATTEMPTS) {
+                    DiagnosticLog.info(
+                        "CONNECT",
+                        "attempt=$attempt/$CONNECTION_ATTEMPTS mode=${endpointSettings.mode} " +
+                            "host=${targetHost.ifBlank { "gateway" }} port=$targetPort",
+                    )
                     if (attempt > 1) {
                         mutableState.update {
-                            it.copy(message = "Camera Wi-Fi changed; reconnecting ($attempt/$CONNECTION_ATTEMPTS)…")
+                            it.copy(message = "相机连接变化，正在重试（$attempt/$CONNECTION_ATTEMPTS）…")
                         }
                         delay(CONNECTION_RETRY_DELAY_MS)
                     }
@@ -173,16 +235,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                     val cameraNetwork = CameraNetworkResolver.acquire(
                         getApplication(),
-                        endpointSettings.host.takeIf(String::isNotBlank),
+                        targetHost.takeIf(String::isNotBlank),
                     )
-                    val endpoint = "${cameraNetwork.gatewayAddress}:${endpointSettings.port}"
+                    val endpoint = "${cameraNetwork.gatewayAddress}:$targetPort"
                     val routeDescription = "${cameraNetwork.phoneAddress} → $endpoint"
+                    DiagnosticLog.info("NETWORK", "route=$routeDescription")
                     mutableState.update {
-                        it.copy(message = "Nikon Wi-Fi route: $routeDescription (attempt $attempt/$CONNECTION_ATTEMPTS)")
+                        it.copy(message = "正在连接 Zf（$attempt/$CONNECTION_ATTEMPTS）")
                     }
                     val candidate = PtpIpClient(
                         host = cameraNetwork.gatewayAddress,
-                        cameraPort = endpointSettings.port,
+                        cameraPort = targetPort,
                         clientGuid = cameraSettings.clientGuid,
                         socketFactory = cameraNetwork.network.socketFactory,
                     )
@@ -192,6 +255,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     try {
                         candidate.connect()
                         val device = candidate.getDeviceInfo()
+                        DiagnosticLog.info(
+                            "CONNECT",
+                            "device=${device.displayName} firmware=${device.deviceVersion} " +
+                                "operations=${device.operationsSupported.size} thumbnails=${device.supportsThumbnail} " +
+                                "partial=${device.supportsPartialObject}",
+                        )
+                        if (endpointSettings.mode == CameraConnectionMode.STA && !device.isBrowseCompatible &&
+                            (discoveredSta?.apps == "NSPP" || mutableState.value.staFirstRegistration)
+                        ) {
+                            mutableState.update {
+                                it.copy(message = "Zf 正在首次登记 STA 客户端…")
+                            }
+                            candidate.registerStaClient()
+                            candidate.close()
+                            client = null
+                            cameraNetwork.close()
+                            networkLease = null
+                            mutableState.update {
+                                it.copy(
+                                    staFirstRegistration = false,
+                                    message = "STA 登记请求已发送。请在 Zf 上按 J 确认，随后再次点连接。",
+                                )
+                            }
+                            return@runWork
+                        }
                         if (!device.isBrowseCompatible) {
                             val missing = device.missingRequiredOperations
                                 .joinToString { "0x${it.toString(16).uppercase()}" }
@@ -202,12 +290,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         connectedClient = candidate
                         connectedDevice = device
                         connectedEndpoint = endpoint
+                        DiagnosticLog.info("CONNECT", "attempt=$attempt accepted endpoint=$endpoint")
                         break
                     } catch (error: Throwable) {
+                        DiagnosticLog.warn("CONNECT", "attempt=$attempt failed endpoint=$endpoint", error)
                         runCatching { candidate.close() }
                         client = null
                         runCatching { cameraNetwork.close() }
                         networkLease = null
+                        if (endpointSettings.mode == CameraConnectionMode.STA &&
+                            error is PtpInitRejectedException && error.reason == 1
+                        ) {
+                            throw PtpException(
+                                "Zf 拒绝当前 STA 客户端身份（PTP/IP 0x1）。" +
+                                    "请在相机的 Wi-Fi STA 菜单创建新配置文件，并用本应用完成首次登记。",
+                                error,
+                            )
+                        }
                         if (attempt == CONNECTION_ATTEMPTS) throw error
                     }
                 }
@@ -227,23 +326,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 mutableState.update {
                     it.copy(
                         connected = true,
+                        staFirstRegistration = false,
                         cameraName = device.displayName,
                         cameraInfo = device,
-                        compatibilityStatus = if (device.model.contains("D5300", ignoreCase = true)) {
-                            "Verified with this app"
+                        compatibilityStatus = if (device.model.contains("D5300", ignoreCase = true) ||
+                            device.model.contains("Z f", ignoreCase = true)
+                        ) {
+                            "已在本应用验证"
                         } else {
-                            "Required browsing operations available; hardware verification requested"
+                            "支持照片浏览，仍需实机验证"
                         },
                         connectedEndpoint = connectedEndpoint,
                         photos = cachedMedia,
                         thumbnails = emptyMap(),
-                        selected = emptySet(),
+                        selected = it.selected.intersect(cachedMedia.map(CameraObject::handle).toSet()),
                         lastSyncedAtMillis = cameraCache?.syncedAtMillis ?: 0L,
                         thumbnailCacheBytes = galleryCache.thumbnailUsageBytes(),
-                        message = "${device.displayName} detected; checking for new media…",
+                        message = "已连接 ${device.displayName}，正在检查照片…",
                     )
                 }
                 synchronizeLibrary(cameraClient, forceMetadataRefresh = false)
+                reconnectWhenForeground = false
+                DiagnosticLog.info("CONNECT", "catalog synchronized camera=${device.displayName}")
             }
             if (!mutableState.value.connected) {
                 runCatching { networkLease?.close() }
@@ -254,29 +358,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun startAutoConnect() {
+    fun scanBluetooth() = bleController.scan()
+    fun stopBluetoothScan() = bleController.stopScan()
+    fun connectBluetooth(address: String) = bleController.connect(address)
+    fun wakeCameraWifi() = bleController.requestWifi()
+
+    fun onAppBackgrounded() {
+        appForeground = false
+        if (mutableState.value.connected && mutableState.value.connectionMode == CameraConnectionMode.STA) {
+            reconnectWhenForeground = true
+        }
+    }
+
+    fun onAppForegrounded() {
+        appForeground = true
+        if (!reconnectWhenForeground) return
+        viewModelScope.launch(Dispatchers.IO) {
+            if (connectionJob?.isActive == true || transferJob?.isActive == true) return@launch
+            val cameraClient = client
+            if (mutableState.value.connected && cameraClient != null) {
+                val probe = runCatching { cameraClient.ping() }
+                if (probe.isSuccess) {
+                    reconnectWhenForeground = false
+                    DiagnosticLog.info("RESUME", "STA connection still alive after returning to app")
+                    return@launch
+                }
+                DiagnosticLog.warn("RESUME", "STA connection lost while app was in background", probe.exceptionOrNull())
+                markConnectionLost(cameraClient)
+            }
+        }
+    }
+
+    fun startHeartbeat() {
         if (autoConnectJob?.isActive == true) return
         autoConnectJob = viewModelScope.launch(Dispatchers.IO) {
             var nextHeartbeatAt = 0L
             while (isActive) {
                 val connected = mutableState.value.connected
-                if (!connected &&
-                    connectionJob?.isActive != true &&
-                    CameraNetworkResolver.find(
-                        getApplication(),
-                        cameraSettings.endpoint.host.takeIf(String::isNotBlank),
-                    ) != null
-                ) {
-                    connect()
-                } else if (connected && connectionJob?.isActive != true) {
+                if (connected && connectionJob?.isActive != true) {
                     val now = SystemClock.elapsedRealtime()
                     if (now >= nextHeartbeatAt) {
                         nextHeartbeatAt = now + HEARTBEAT_INTERVAL_MS
                         client?.let { cameraClient ->
                             runCatching { cameraClient.ping() }
-                                .onFailure { markConnectionLost(cameraClient) }
+                                .onFailure { error ->
+                                    DiagnosticLog.warn("HEARTBEAT", "camera ping failed", error)
+                                    markConnectionLost(cameraClient)
+                                }
                         }
                     }
+                } else if (!connected && appForeground && reconnectWhenForeground &&
+                    connectionJob?.isActive != true && transferJob?.isActive != true
+                ) {
+                    reconnectWhenForeground = false
+                    DiagnosticLog.info("RESUME", "reconnecting STA after link loss")
+                    connect()
                 }
                 delay(AUTO_CONNECT_POLL_MS)
             }
@@ -310,6 +446,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshLibrary() {
         if (!mutableState.value.connected || mutableState.value.busy) return
         val cameraClient = client ?: return
+        DiagnosticLog.info("CATALOG", "manual refresh requested")
         viewModelScope.launch(Dispatchers.IO) {
             runWork("Refreshing camera library…") {
                 synchronizeLibrary(cameraClient, forceMetadataRefresh = true)
@@ -317,31 +454,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun saveCameraEndpoint(host: String, portText: String) {
+    fun saveCameraEndpoint(host: String, portText: String, mode: CameraConnectionMode, staFirstRegistration: Boolean) {
         val trimmedHost = host.trim()
         val port = portText.toIntOrNull()
         if (trimmedHost.isNotEmpty() && !trimmedHost.isValidIpv4Address()) {
-            mutableState.update { it.copy(message = "Enter a valid IPv4 camera address") }
+            mutableState.update { it.copy(message = "请输入有效的相机 IPv4 地址") }
             return
         }
         if (port == null || port !in 1..65535) {
-            mutableState.update { it.copy(message = "Enter a valid camera port") }
+            mutableState.update { it.copy(message = "请输入有效的相机端口") }
             return
         }
-        cameraSettings.endpoint = CameraEndpointSettings(trimmedHost, port)
+        cameraSettings.endpoint = CameraEndpointSettings(trimmedHost, port, mode)
+        DiagnosticLog.info(
+            "SETTINGS",
+            "endpoint mode=$mode " +
+                "host=${trimmedHost.ifBlank { "auto" }} port=$port",
+        )
         mutableState.update {
             it.copy(
                 manualCameraHost = trimmedHost,
+                connectionMode = mode,
+                staFirstRegistration = mode == CameraConnectionMode.STA && staFirstRegistration,
                 cameraPort = port,
-                message = if (trimmedHost.isBlank()) {
-                    "Automatic camera gateway discovery enabled"
+                message = if (trimmedHost.isBlank() && mode == CameraConnectionMode.AP) {
+                    "AP 模式：连接相机热点后自动查找地址"
+                } else if (trimmedHost.isBlank()) {
+                    "STA 模式：自动搜索局域网中的相机"
                 } else {
-                    "Manual camera endpoint saved: $trimmedHost:$port"
+                    "已保存相机地址：$trimmedHost:$port"
                 },
             )
         }
         client?.let(::markConnectionLost)
     }
+
+    fun savedCameraEndpoint(mode: CameraConnectionMode): CameraEndpointSettings = cameraSettings.endpointFor(mode)
 
     fun compatibilityReport(): String {
         val current = mutableState.value
@@ -394,7 +542,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.update {
             it.copy(
                 thumbnailCacheBytes = 0L,
-                message = "Preview cache cleared; the media catalog is still available offline.",
+                message = "预览缓存已清除，照片目录仍可离线浏览。",
             )
         }
     }
@@ -410,7 +558,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             existing.cameraIdentity != currentCameraIdentity
         ) {
             mutableState.update {
-                it.copy(message = "The existing download queue belongs to another camera")
+                it.copy(message = "现有下载队列属于另一台相机")
             }
             return
         }
@@ -418,7 +566,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val additions = selectedPhotos.distinctBy { it.downloadIdentity() }
             .filterNot { it.downloadIdentity() in existingKeys }
         if (additions.isEmpty()) {
-            mutableState.update { it.copy(message = "Those files are already in the download queue") }
+            mutableState.update { it.copy(message = "这些文件已在下载队列中") }
             return
         }
         val queue = existing?.copy(
@@ -428,6 +576,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             totalBytes = existing.totalBytes + additions.sumOf { it.size.coerceAtLeast(0L) },
         ) ?: DownloadQueueSnapshot.create(additions, currentCameraIdentity)
         downloadQueueStore.save(queue)
+        DiagnosticLog.info(
+            "TRANSFER",
+            "queued=${additions.size} total=${queue.totalCount} bytes=${queue.totalBytes}",
+        )
         mutableState.update {
             it.copy(
                 selected = emptySet(),
@@ -435,7 +587,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 downloadQueueTotal = queue.totalCount,
                 transferProgress = queue.overallProgress(),
                 downloadSummary = null,
-                message = "Queued ${additions.size} original files",
+                message = "已加入 ${additions.size} 个原始文件",
             )
         }
         resumeQueuedDownloads()
@@ -443,6 +595,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun cancelDownload() {
         if (mutableState.value.downloadQueueRemaining == 0 && transferJob?.isActive != true) return
+        DiagnosticLog.warn("TRANSFER", "user cancelled download queue")
         val pendingUris = synchronized(downloadQueueStateLock) {
             transferCancellationRequested = true
             val uris = downloadQueueStore.load()?.items.orEmpty()
@@ -452,7 +605,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val job = transferJob?.takeIf(Job::isActive)
         if (job != null) {
-            mutableState.update { it.copy(message = "Cancelling download queue…") }
+            mutableState.update { it.copy(message = "正在取消下载队列…") }
             job.cancel()
             client?.let(::markConnectionLost)
         }
@@ -465,7 +618,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 downloadQueueTotal = 0,
                 transferProgress = null,
                 currentFileProgress = null,
-                message = if (job == null) "Download queue cancelled" else "Download cancelled; reconnecting…",
+                message = if (job == null) "下载队列已取消" else "下载已取消，正在重新连接…",
             )
         }
     }
@@ -479,7 +632,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val queue = downloadQueueStore.load() ?: return
         if (queue.cameraIdentity.isNotBlank() && queue.cameraIdentity != currentCameraIdentity) {
             mutableState.update {
-                it.copy(message = "${queue.items.size} downloads are waiting for their original camera")
+                it.copy(message = "${queue.items.size} 个文件等待原相机连接")
             }
             return
         }
@@ -535,11 +688,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             var queued = queue.items.first()
             val media = queued.media
             val ordinal = queue.processedCount + 1
+            DiagnosticLog.info(
+                "TRANSFER",
+                "file start index=$ordinal/${queue.totalCount} handle=${media.handle} " +
+                    "format=0x${media.format.toString(16).uppercase()} size=${media.size} " +
+                    "resume=${queued.downloadedBytes} attempts=${queued.attempts}",
+            )
 
             if (PhotoSaver.isAlreadyDownloaded(getApplication(), media)) {
+                DiagnosticLog.info("TRANSFER", "file skipped existing handle=${media.handle} size=${media.size}")
                 PhotoSaver.discardIncomplete(getApplication(), queued.pendingUri)
                 queue = queue.completeFirst(skipped = true)
-                persistQueueProgress(queue, "Already downloaded: ${media.filename}")
+                persistQueueProgress(queue, "已存在：${media.filename}")
                 continue
             }
 
@@ -628,6 +788,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     },
                 )
                 pendingPhoto.commit(media.size)
+                DiagnosticLog.info("TRANSFER", "file verified handle=${media.handle} bytes=${media.size}")
             } catch (error: Throwable) {
                 if (error is CancellationException ||
                     transferCancellationRequested ||
@@ -641,6 +802,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val nextAttempt = queued.attempts + 1
                 val connectionFailure = error.isConnectionFailure()
                 val failureReason = friendlyMessage(error)
+                DiagnosticLog.error(
+                    "TRANSFER",
+                    "file failed handle=${media.handle} size=${media.size} " +
+                        "attempt=$nextAttempt/$MAX_DOWNLOAD_ATTEMPTS connectionFailure=$connectionFailure",
+                    error,
+                )
                 queue = if (nextAttempt >= MAX_DOWNLOAD_ATTEMPTS) {
                     pendingPhoto?.discard()
                         ?: PhotoSaver.discardIncomplete(getApplication(), queued.pendingUri)
@@ -685,7 +852,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             queue = queue.completeFirst(skipped = false)
-            persistQueueProgress(queue, "Verified ${media.filename}")
+            persistQueueProgress(queue, "已校验 ${media.filename}")
         }
         finishDownloadQueue(queue)
     }
@@ -701,12 +868,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 downloadQueueTotal = queue.totalCount,
                 currentFileProgress = null,
                 transferProgress = queue.overallProgress(),
-                message = "$message • ${queue.items.size} remaining",
+                message = "$message · 剩余 ${queue.items.size} 个",
             )
         }
     }
 
     private fun finishDownloadQueue(queue: DownloadQueueSnapshot) {
+        DiagnosticLog.info(
+            "TRANSFER",
+            "queue finished saved=${queue.downloadedCount} skipped=${queue.skippedCount} " +
+                "failed=${queue.failedFilenames.size}",
+        )
         synchronized(downloadQueueStateLock) {
             downloadQueueStore.clear()
         }
@@ -725,9 +897,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 currentFileProgress = null,
                 downloadSummary = summary,
                 message = buildString {
-                    append("Download complete: ${summary.downloadedCount} saved")
-                    if (summary.skippedCount > 0) append(", ${summary.skippedCount} already present")
-                    if (summary.failedFilenames.isNotEmpty()) append(", ${summary.failedFilenames.size} failed")
+                    append("下载完成：已保存 ${summary.downloadedCount} 个")
+                    if (summary.skippedCount > 0) append("，跳过 ${summary.skippedCount} 个")
+                    if (summary.failedFilenames.isNotEmpty()) append("，失败 ${summary.failedFilenames.size} 个")
                 },
             )
         }
@@ -847,6 +1019,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                 } ?: lastError?.let { error ->
+                    DiagnosticLog.warn("PREVIEW", "thumbnail unavailable handle=$handle", error)
                     if (error.isConnectionFailure()) markConnectionLost(cameraClient)
                 }
             } finally {
@@ -912,6 +1085,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun markConnectionLost(failedClient: PtpIpClient) {
         synchronized(connectionStateLock) {
             if (client !== failedClient || !mutableState.value.connected) return
+            DiagnosticLog.warn("CONNECT", "camera link lost")
+            if (mutableState.value.connectionMode == CameraConnectionMode.STA) reconnectWhenForeground = true
             failedClient.abort()
             client = null
             runCatching { networkLease?.close() }
@@ -922,7 +1097,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     connected = false,
                     busy = false,
                     transferProgress = null,
-                    message = "Camera link was interrupted; reconnecting…",
+                    message = "相机连接中断，正在重新连接…",
                 )
             }
         }
@@ -946,16 +1121,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         cameraClient: PtpIpClient,
         forceMetadataRefresh: Boolean,
     ) {
+        DiagnosticLog.info("CATALOG", "sync start forceMetadataRefresh=$forceMetadataRefresh")
         val handles = cameraClient.listObjectHandles()
+        DiagnosticLog.info("CATALOG", "handles=${handles.size}")
         val cachedByHandle = cachedCameraObjects.associateBy(CameraObject::handle)
         val objects = ArrayList<CameraObject>(handles.size)
         handles.forEachIndexed { index, handle ->
             val cached = cachedByHandle[handle].takeUnless { forceMetadataRefresh }
-            val cameraObject = cached ?: runCatching { cameraClient.getObjectInfo(handle) }.getOrNull()
+            val cameraObject = cached ?: runCatching { cameraClient.getObjectInfo(handle) }
+                .onFailure { error -> DiagnosticLog.warn("CATALOG", "object info failed handle=$handle", error) }
+                .getOrNull()
             cameraObject?.let(objects::add)
             if ((index + 1) % 10 == 0 || index + 1 == handles.size) {
                 mutableState.update {
-                    it.copy(message = "Synchronizing media: ${index + 1} of ${handles.size}")
+                    it.copy(message = "正在同步照片：${index + 1}/${handles.size}")
                 }
             }
         }
@@ -971,6 +1150,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .sortedWith(compareByDescending<CameraObject> { it.captureDate }.thenByDescending { it.handle })
             .toList()
         val summary = inventorySummary(objects, handles.size)
+        DiagnosticLog.info("CATALOG", "sync complete objects=${objects.size} media=${media.size} summary=$summary")
         val syncedAt = System.currentTimeMillis()
         galleryCache.saveCatalog(objects, syncedAt)
         mutableState.update {
@@ -1000,7 +1180,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .coerceAtLeast(0)
         return buildString {
             append(jpegCount + rawCount + otherPhotoCount)
-            append(" photos found (")
+            append(" 张照片（")
             append(jpegCount)
             append(" JPEG")
             if (rawCount > 0) {
@@ -1011,18 +1191,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (otherPhotoCount > 0) {
                 append(", ")
                 append(otherPhotoCount)
-                append(" other")
+                append(" 其他")
             }
-            append(')')
+            append('）')
             if (videoCount > 0) {
                 append(" • ")
                 append(videoCount)
-                append(if (videoCount == 1) " video available" else " videos available")
+                append(" 个视频")
             }
             if (otherCount > 0) {
                 append(" • ")
                 append(otherCount)
-                append(if (otherCount == 1) " other object" else " other objects")
+                append(" 个其他文件")
             }
         }
     }
@@ -1034,10 +1214,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun runWork(startMessage: String, block: suspend () -> Unit) {
+        DiagnosticLog.info("WORK", "start=$startMessage")
         mutableState.update { it.copy(busy = true, message = startMessage) }
         try {
             block()
         } catch (error: Throwable) {
+            DiagnosticLog.error("WORK", "failed start=$startMessage", error)
             if (transferCancellationRequested) {
                 runCatching { client?.abort() }
                 client = null
@@ -1047,7 +1229,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(
                         connected = false,
                         transferProgress = null,
-                        message = "Download cancelled; reconnecting…",
+                        message = "下载已取消，正在重新连接…",
                     )
                 }
             } else {
@@ -1089,6 +1271,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         client?.close()
         networkLease?.close()
+        bleController.close()
     }
 
     companion object {

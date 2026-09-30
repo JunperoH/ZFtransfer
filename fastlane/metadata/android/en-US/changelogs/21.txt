@@ -1,1 +1,0 @@
-Fixes large Nikon video downloads by using bounded partial-object transfers on supported cameras. Also isolates idle event-channel closures and reports the underlying reason for failed transfers.

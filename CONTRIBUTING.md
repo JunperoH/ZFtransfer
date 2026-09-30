@@ -1,22 +1,19 @@
-# Contributing
+# 参与开发与反馈
 
-Thank you for helping improve Nikon Pull. Camera owners are especially valuable because compatibility cannot be established reliably from model names alone.
+本分支主要测试 Nikon Zf 的 AP/STA 连接和原图传输。提交问题前请查看 [兼容性说明](docs/COMPATIBILITY.md)。
 
-## Before reporting a camera
+## 报告问题
 
-1. Confirm that the camera is intended for Nikon's legacy Wireless Mobile Utility (WMU), either through built-in Wi-Fi or a WU-1a/WU-1b adapter. SnapBridge-only cameras are currently out of scope.
-2. Install the latest test build and connect the phone directly to the camera's Wi-Fi network.
-3. Verify catalog loading, several thumbnails, one small JPEG download, and—when available—one RAW or video download.
-4. Open **Camera → Share privacy-safe compatibility report** and attach the resulting text to the camera compatibility issue form.
-5. Do not attach photographs, camera serial numbers, Wi-Fi passwords, or unredacted network captures.
+请提供应用版本、Android 版本、相机型号和固件、AP/STA 模式、复现步骤、预期与实际结果。可在“关于”中主动导出诊断日志，但公开前请删除本地 IP、文件名、设备标识等个人信息。不要上传照片、Wi-Fi 密码、相机序列号或未经处理的抓包。
 
-## Source changes
+蓝牙入口仍是实验功能；蓝牙失败与 AP/STA 失败请分开报告。
 
-- Use Java 17 and the checked-in Gradle wrapper.
-- Run `./gradlew testDebugUnitTest lintDebug assembleDebug` before submitting a change.
-- Keep PTP parsing bounded and validate every length/count received from a camera.
-- Preserve original media bytes; never decode and re-encode downloads.
-- Avoid analytics, trackers, proprietary SDKs, or unnecessary Android permissions.
-- Add unit tests for protocol parsing and media classification changes.
+## 提交代码
 
-By contributing, you agree that your contribution is licensed under `GPL-3.0-or-later`.
+- 使用 Java 17 和仓库中的 Gradle Wrapper。
+- 运行 `./gradlew testDebugUnitTest lintDebug assembleDebug`（Windows 使用 `gradlew.bat`）。
+- 解析来自相机的数据时限制长度和数量；下载必须保留原始字节。
+- 协议和文件分类改动应添加有意义的单元测试。
+- 不要提交构建产物、调试签名、设备日志或个人照片。
+
+贡献按 [GPL-3.0-or-later](LICENSE) 授权。本项目基于 [Nikon Pull](https://github.com/noisetta/Nikon-Pull)；请保留上游版权和许可信息。
