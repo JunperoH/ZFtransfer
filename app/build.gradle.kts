@@ -14,8 +14,8 @@ android {
         applicationId = "io.github.noisetta.nikonpull.zflab"
         minSdk = 29
         targetSdk = 36
-        versionCode = 12
-        versionName = "0.3.5-zf-lab"
+        versionCode = 13
+        versionName = "0.3.6-zf-lab"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

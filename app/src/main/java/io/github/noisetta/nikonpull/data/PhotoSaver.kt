@@ -12,6 +12,51 @@ import java.io.FilterOutputStream
 import java.io.OutputStream
 
 object PhotoSaver {
+    /** One directory scan for the gallery, instead of a MediaStore query per thumbnail. */
+    fun downloadedHandles(context: Context, photos: List<CameraObject>): Set<Long> {
+        if (photos.isEmpty()) return emptySet()
+        val tree = DownloadLocation(context).treeUri
+        if (tree != null) {
+            val existing = listDocuments(context, tree)
+                .asSequence()
+                .filter { it.size > 0L && !it.name.endsWith(PARTIAL_SUFFIX) }
+                .map { it.name to it.size }
+                .toSet()
+            return photos.asSequence()
+                .filter { it.size > 0L && (it.filename to it.size) in existing }
+                .map(CameraObject::handle)
+                .toSet()
+        }
+        val images = savedMedia(context, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, PHOTO_DESTINATION_DIRECTORY)
+        val videos = savedMedia(context, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, VIDEO_DESTINATION_DIRECTORY)
+        return photos.asSequence()
+            .filter { photo ->
+                photo.size > 0L && (photo.filename to photo.size) in if (photo.isVideo) videos else images
+            }
+            .map(CameraObject::handle)
+            .toSet()
+    }
+
+    private fun savedMedia(context: Context, collection: Uri, directory: String): Set<Pair<String, Long>> {
+        val path = MediaStore.MediaColumns.RELATIVE_PATH
+        val selection = "($path = ? OR $path = ?) AND ${MediaStore.MediaColumns.IS_PENDING} = 0"
+        return context.contentResolver.query(
+            collection,
+            arrayOf(MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.SIZE),
+            selection,
+            arrayOf(directory, "$directory/"),
+            null,
+        )?.use { cursor ->
+            buildSet {
+                while (cursor.moveToNext()) {
+                    val name = cursor.getString(0).orEmpty()
+                    val size = if (cursor.isNull(1)) -1L else cursor.getLong(1)
+                    if (name.isNotEmpty() && size > 0L) add(name to size)
+                }
+            }
+        }.orEmpty()
+    }
+
     fun isAlreadyDownloaded(context: Context, photo: CameraObject): Boolean {
         if (photo.size <= 0L) return false
         DownloadLocation(context).treeUri?.let { tree ->

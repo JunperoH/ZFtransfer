@@ -10,6 +10,7 @@ import org.json.JSONObject
 data class CachedGallery(
     val objects: List<CameraObject>,
     val syncedAtMillis: Long,
+    val newIdentities: Set<String> = emptySet(),
 )
 
 class GalleryCache(context: Context) {
@@ -62,11 +63,17 @@ class GalleryCache(context: Context) {
                 )
             }
         }
-        CachedGallery(objects, rootJson.optLong("syncedAtMillis"))
+        val newItems = rootJson.optJSONArray("newIdentities")
+        val newIdentities = buildSet {
+            if (newItems != null) {
+                for (index in 0 until newItems.length()) add(newItems.getString(index))
+            }
+        }
+        CachedGallery(objects, rootJson.optLong("syncedAtMillis"), newIdentities)
     }.getOrNull()
 
     @Synchronized
-    fun saveCatalog(objects: List<CameraObject>, syncedAtMillis: Long) {
+    fun saveCatalog(objects: List<CameraObject>, syncedAtMillis: Long, newIdentities: Set<String> = emptySet()) {
         val activeRoot = activeRoot().apply { mkdirs() }
         val catalogFile = File(activeRoot, CATALOG_FILENAME)
         val items = JSONArray()
@@ -85,6 +92,7 @@ class GalleryCache(context: Context) {
         val json = JSONObject()
             .put("version", CATALOG_VERSION)
             .put("syncedAtMillis", syncedAtMillis)
+            .put("newIdentities", JSONArray().also { array -> newIdentities.forEach(array::put) })
             .put("objects", items)
             .toString()
         val temporary = File(activeRoot, "$CATALOG_FILENAME.tmp")

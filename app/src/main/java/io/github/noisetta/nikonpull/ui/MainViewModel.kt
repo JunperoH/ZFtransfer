@@ -21,6 +21,8 @@ import io.github.noisetta.nikonpull.data.DownloadQueueSnapshot
 import io.github.noisetta.nikonpull.data.DownloadQueueStore
 import io.github.noisetta.nikonpull.data.DownloadLocation
 import io.github.noisetta.nikonpull.data.PhotoSaver
+import io.github.noisetta.nikonpull.data.galleryIdentity
+import io.github.noisetta.nikonpull.data.updatedNewIdentities
 import io.github.noisetta.nikonpull.diagnostics.DiagnosticLog
 import io.github.noisetta.nikonpull.network.CameraNetworkLease
 import io.github.noisetta.nikonpull.network.CameraNetworkResolver
@@ -61,7 +63,10 @@ data class AppState(
     val librarySummary: String = "",
     val photos: List<CameraObject> = emptyList(),
     val selected: Set<Long> = emptySet(),
+    val newHandles: Set<Long> = emptySet(),
+    val downloadedHandles: Set<Long> = emptySet(),
     val thumbnails: Map<Long, ByteArray> = emptyMap(),
+    val thumbnailCacheRevision: Int = 0,
     val transferProgress: Float? = null,
     val currentFileProgress: Float? = null,
     val downloadActive: Boolean = false,
@@ -99,6 +104,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val downloadLocation = DownloadLocation(application)
     private var currentCameraIdentity: String = ""
     private var cachedCameraObjects: List<CameraObject> = emptyList()
+    private var cachedNewIdentities: Set<String> = emptySet()
+    @Volatile private var thumbnailCacheGeneration = 0
     private val cacheLoadJob: Job
     private val connectionStateLock = Any()
     private val downloadQueueStateLock = Any()
@@ -119,6 +126,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return runCatching {
             downloadLocation.save(getApplication(), uri)
             mutableState.update { it.copy(downloadLocationLabel = downloadLocation.label) }
+            refreshDownloadedStatus()
             DiagnosticLog.info("STORAGE", "custom download folder selected")
             true
         }.getOrElse { error ->
@@ -132,6 +140,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             downloadQueueStore.load()?.items?.isNotEmpty() == true) return false
         downloadLocation.reset()
         mutableState.update { it.copy(downloadLocationLabel = downloadLocation.label) }
+        refreshDownloadedStatus()
         DiagnosticLog.info("STORAGE", "default download folder selected")
         return true
     }
@@ -155,11 +164,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
             if (cached != null) {
                 cachedCameraObjects = cached.objects
+                cachedNewIdentities = cached.newIdentities
                 val media = cached.objects.filter { it.isPhoto || it.isVideo }
                 val summary = inventorySummary(cached.objects, cached.objects.size)
+                val downloaded = scanDownloaded(media)
                 mutableState.update {
                     it.copy(
                         photos = media,
+                        newHandles = media.filter { photo -> photo.galleryIdentity() in cached.newIdentities }
+                            .mapTo(HashSet()) { photo -> photo.handle },
+                        downloadedHandles = downloaded,
                         librarySummary = summary,
                         message = "已载入缓存照片，可离线选择",
                         lastSyncedAtMillis = cached.syncedAtMillis,
@@ -322,7 +336,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     migrateLegacy = device.model.contains("D5300", ignoreCase = true),
                 )
                 cachedCameraObjects = cameraCache?.objects.orEmpty()
+                cachedNewIdentities = cameraCache?.newIdentities.orEmpty()
                 val cachedMedia = cachedCameraObjects.filter { it.isPhoto || it.isVideo }
+                val downloaded = scanDownloaded(cachedMedia)
                 mutableState.update {
                     it.copy(
                         connected = true,
@@ -339,6 +355,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         connectedEndpoint = connectedEndpoint,
                         photos = cachedMedia,
                         thumbnails = emptyMap(),
+                        newHandles = cachedMedia
+                            .filter { photo -> photo.galleryIdentity() in cachedNewIdentities }
+                            .mapTo(HashSet()) { photo -> photo.handle },
+                        downloadedHandles = downloaded,
                         selected = it.selected.intersect(cachedMedia.map(CameraObject::handle).toSet()),
                         lastSyncedAtMillis = cameraCache?.syncedAtMillis ?: 0L,
                         thumbnailCacheBytes = galleryCache.thumbnailUsageBytes(),
@@ -531,6 +551,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         galleryCache.thumbnailLimitBytes = megabytes.toLong() * BYTES_PER_MB
         mutableState.update {
             it.copy(
+                thumbnails = emptyMap(),
+                thumbnailCacheRevision = it.thumbnailCacheRevision + 1,
                 thumbnailCacheBytes = galleryCache.thumbnailUsageBytes(),
                 thumbnailCacheLimitBytes = galleryCache.thumbnailLimitBytes,
             )
@@ -538,12 +560,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearThumbnailCache() = viewModelScope.launch(Dispatchers.IO) {
+        thumbnailCacheGeneration++
+        synchronized(thumbnailRequests) { thumbnailRequests.clear() }
         galleryCache.clearThumbnails()
         mutableState.update {
             it.copy(
+                thumbnails = emptyMap(),
+                thumbnailCacheRevision = it.thumbnailCacheRevision + 1,
                 thumbnailCacheBytes = 0L,
-                message = "预览缓存已清除，照片目录仍可离线浏览。",
+                message = "预览缓存已清除；连接相机后可按需重新加载。",
             )
+        }
+    }
+
+    fun markNewAsSeen() = viewModelScope.launch(Dispatchers.IO) {
+        cachedNewIdentities = emptySet()
+        galleryCache.saveCatalog(cachedCameraObjects, mutableState.value.lastSyncedAtMillis, emptySet())
+        mutableState.update { it.copy(newHandles = emptySet()) }
+    }
+
+    private fun scanDownloaded(photos: List<CameraObject>): Set<Long> = runCatching {
+        PhotoSaver.downloadedHandles(getApplication(), photos)
+    }.onFailure { error ->
+        DiagnosticLog.warn("STORAGE", "could not scan saved originals", error)
+    }.getOrDefault(emptySet())
+
+    private fun refreshDownloadedStatus() = viewModelScope.launch(Dispatchers.IO) {
+        val photos = mutableState.value.photos
+        val downloaded = scanDownloaded(photos)
+        mutableState.update { current ->
+            if (current.photos == photos) current.copy(downloadedHandles = downloaded) else current
         }
     }
 
@@ -697,6 +743,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             if (PhotoSaver.isAlreadyDownloaded(getApplication(), media)) {
                 DiagnosticLog.info("TRANSFER", "file skipped existing handle=${media.handle} size=${media.size}")
+                mutableState.update { it.copy(downloadedHandles = it.downloadedHandles + media.handle) }
                 PhotoSaver.discardIncomplete(getApplication(), queued.pendingUri)
                 queue = queue.completeFirst(skipped = true)
                 persistQueueProgress(queue, "已存在：${media.filename}")
@@ -789,6 +836,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 pendingPhoto.commit(media.size)
                 DiagnosticLog.info("TRANSFER", "file verified handle=${media.handle} bytes=${media.size}")
+                mutableState.update { it.copy(downloadedHandles = it.downloadedHandles + media.handle) }
             } catch (error: Throwable) {
                 if (error is CancellationException ||
                     transferCancellationRequested ||
@@ -971,9 +1019,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             filename == expected.filename &&
             (captureDate.isBlank() || expected.captureDate.isBlank() || captureDate == expected.captureDate)
 
-    fun requestThumbnail(photo: CameraObject) {
+    fun requestThumbnail(photo: CameraObject, allowRemote: Boolean) {
         val handle = photo.handle
         if (handle in mutableState.value.thumbnails) return
+        val generation = thumbnailCacheGeneration
+        val cameraKey = galleryCache.cameraKey
         synchronized(thumbnailRequests) {
             if (!thumbnailRequests.add(handle)) return
         }
@@ -982,15 +1032,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 galleryCache.readThumbnail(photo)?.let { cachedBytes ->
                     if (isDecodableImage(cachedBytes)) {
-                        mutableState.update {
-                            it.copy(thumbnails = it.thumbnails + (handle to cachedBytes))
+                        if (generation == thumbnailCacheGeneration && cameraKey == galleryCache.cameraKey) {
+                            mutableState.update { it.withThumbnail(handle, cachedBytes) }
                         }
                         return@launch
                     }
                     galleryCache.deleteThumbnail(photo)
                 }
 
-                if (!mutableState.value.connected) return@launch
+                if (!allowRemote || !mutableState.value.connected) return@launch
                 val cameraClient = client ?: return@launch
                 var thumbnail: ByteArray? = null
                 var lastError: Throwable? = null
@@ -1011,12 +1061,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     thumbnail = result.getOrNull()
                 }
                 thumbnail?.let { bytes ->
+                    if (generation != thumbnailCacheGeneration || cameraKey != galleryCache.cameraKey) return@launch
                     galleryCache.writeThumbnail(photo, bytes)
                     mutableState.update {
-                        it.copy(
-                            thumbnails = it.thumbnails + (handle to bytes),
-                            thumbnailCacheBytes = galleryCache.thumbnailUsageBytes(),
-                        )
+                        it.withThumbnail(handle, bytes).copy(thumbnailCacheBytes = galleryCache.thumbnailUsageBytes())
                     }
                 } ?: lastError?.let { error ->
                     DiagnosticLog.warn("PREVIEW", "thumbnail unavailable handle=$handle", error)
@@ -1024,10 +1072,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } finally {
                 synchronized(thumbnailRequests) {
-                    thumbnailRequests.remove(handle)
+                    if (generation == thumbnailCacheGeneration) thumbnailRequests.remove(handle)
                 }
             }
         }
+    }
+
+    private fun AppState.withThumbnail(handle: Long, bytes: ByteArray): AppState {
+        val kept = LinkedHashMap(thumbnails)
+        kept.remove(handle)
+        kept[handle] = bytes
+        var used = kept.values.sumOf(ByteArray::size)
+        val iterator = kept.entries.iterator()
+        while (used > MAX_MEMORY_THUMBNAIL_BYTES && iterator.hasNext()) {
+            used -= iterator.next().value.size
+            iterator.remove()
+        }
+        return copy(thumbnails = kept)
     }
 
     private fun createPreviewFromOriginal(
@@ -1143,7 +1204,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             throw PtpException("The camera listed ${handles.size} objects, but their details could not be read")
         }
 
+        val newIdentities = updatedNewIdentities(
+            previous = cachedCameraObjects,
+            unread = cachedNewIdentities,
+            current = objects,
+            hasPreviousCatalog = mutableState.value.lastSyncedAtMillis > 0L,
+        )
         cachedCameraObjects = objects
+        cachedNewIdentities = newIdentities
         val media = objects
             .asSequence()
             .filter { it.isPhoto || it.isVideo }
@@ -1152,11 +1220,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val summary = inventorySummary(objects, handles.size)
         DiagnosticLog.info("CATALOG", "sync complete objects=${objects.size} media=${media.size} summary=$summary")
         val syncedAt = System.currentTimeMillis()
-        galleryCache.saveCatalog(objects, syncedAt)
+        galleryCache.saveCatalog(objects, syncedAt, newIdentities)
+        val downloaded = scanDownloaded(media)
         mutableState.update {
             it.copy(
                 connected = true,
                 photos = media,
+                newHandles = media.filter { photo -> photo.galleryIdentity() in newIdentities }
+                    .mapTo(HashSet()) { photo -> photo.handle },
+                downloadedHandles = downloaded,
                 selected = it.selected.intersect(media.map(CameraObject::handle).toSet()),
                 librarySummary = summary,
                 message = summary,
@@ -1285,6 +1357,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val AUTO_CONNECT_POLL_MS = 250L
         private const val HEARTBEAT_INTERVAL_MS = 5_000L
         private const val BYTES_PER_MB = 1024L * 1024L
+        private const val MAX_MEMORY_THUMBNAIL_BYTES = 32 * 1024 * 1024
         private const val MAX_DOWNLOAD_ATTEMPTS = 3
         private const val DOWNLOAD_RETRY_DELAY_MS = 800L
         private const val MAX_TRANSFER_WAKE_LOCK_MS = 6L * 60L * 60L * 1_000L

@@ -25,7 +25,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
-import androidx.compose.foundation.gestures.awaitTouchSlopOrCancellation
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -107,6 +106,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlin.math.abs
 import io.github.noisetta.nikonpull.ptp.CameraObject
 import io.github.noisetta.nikonpull.bluetooth.NikonBleState
 import io.github.noisetta.nikonpull.data.CameraConnectionMode
@@ -170,6 +170,7 @@ private fun NikonPullScreen(viewModel: MainViewModel = viewModel()) {
         onDispose { view.keepScreenOn = false }
     }
     var selectedFormat by rememberSaveable { mutableStateOf(PhotoFormatFilter.ALL_PHOTOS) }
+    var selectedStatus by rememberSaveable { mutableStateOf(PhotoStatusFilter.ALL) }
     val photosForFormat = remember(state.photos, selectedFormat) {
         state.photos.filter(selectedFormat::matches)
     }
@@ -186,10 +187,18 @@ private fun NikonPullScreen(viewModel: MainViewModel = viewModel()) {
             selectedDateKey = null
         }
     }
-    val filteredPhotos = remember(photosForFormat, selectedDateKey) {
+    val datedPhotos = remember(photosForFormat, selectedDateKey) {
         selectedDateKey?.let { selected ->
             photosForFormat.filter { photo -> photo.captureDate.takeValidDateKey() == selected }
         } ?: photosForFormat
+    }
+    val filteredPhotos = remember(datedPhotos, selectedStatus, state.downloadedHandles, state.newHandles) {
+        datedPhotos.filter { photo -> selectedStatus.matches(photo.handle, state.downloadedHandles, state.newHandles) }
+    }
+    val statusCounts = remember(datedPhotos, state.downloadedHandles, state.newHandles) {
+        PhotoStatusFilter.entries.associateWith { filter ->
+            datedPhotos.count { photo -> filter.matches(photo.handle, state.downloadedHandles, state.newHandles) }
+        }
     }
     val formatCounts = remember(state.photos) {
         mapOf(
@@ -280,9 +289,11 @@ private fun NikonPullScreen(viewModel: MainViewModel = viewModel()) {
             lastSyncedAtMillis = state.lastSyncedAtMillis,
             cacheBytes = state.thumbnailCacheBytes,
             cacheLimitBytes = state.thumbnailCacheLimitBytes,
+            newCount = state.newHandles.count { it !in state.downloadedHandles },
             refreshEnabled = state.connected && !state.busy,
             onLimitSelected = viewModel::setThumbnailCacheLimit,
             onClearPreviews = viewModel::clearThumbnailCache,
+            onMarkNewSeen = viewModel::markNewAsSeen,
             onRefresh = {
                 showCacheDialog = false
                 viewModel.refreshLibrary()
@@ -423,7 +434,7 @@ private fun NikonPullScreen(viewModel: MainViewModel = viewModel()) {
                     Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                if (selectionMode) "滑动连续选择 · 点按逐张增减" else "长按照片开始多选",
+                                if (selectionMode) "上下滑动浏览 · 横滑或长按拖选" else "长按照片开始多选",
                                 modifier = Modifier.weight(1f),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -503,6 +514,9 @@ private fun NikonPullScreen(viewModel: MainViewModel = viewModel()) {
                     counts = formatCounts,
                     selectedFormat = selectedFormat,
                     onFormatSelected = { selectedFormat = it },
+                    statusCounts = statusCounts,
+                    selectedStatus = selectedStatus,
+                    onStatusSelected = { selectedStatus = it },
                     visibleCount = filteredPhotos.size,
                 )
                 PhotoGrid(
@@ -510,7 +524,12 @@ private fun NikonPullScreen(viewModel: MainViewModel = viewModel()) {
                     thumbnails = state.thumbnails,
                     selected = state.selected,
                     selectedOrdinals = selectedOrdinals,
+                    newHandles = state.newHandles,
+                    downloadedHandles = state.downloadedHandles,
                     enabled = !state.busy && !state.downloadActive && state.downloadQueueRemaining == 0,
+                    canFetchThumbnailFromCamera = state.connected && !state.busy && !state.downloadActive &&
+                        state.downloadQueueRemaining == 0,
+                    thumbnailCacheRevision = state.thumbnailCacheRevision,
                     selectionMode = selectionMode,
                     onEnterSelectionMode = { selectionMode = true },
                     onToggle = { handle ->
@@ -519,7 +538,7 @@ private fun NikonPullScreen(viewModel: MainViewModel = viewModel()) {
                     },
                     onSelect = viewModel::select,
                     onThumbnailNeeded = viewModel::requestThumbnail,
-                    resetKey = "${selectedDateKey.orEmpty()}|${selectedFormat.name}",
+                    resetKey = "${selectedDateKey.orEmpty()}|${selectedFormat.name}|${selectedStatus.name}",
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -744,9 +763,11 @@ private fun CacheDialog(
     lastSyncedAtMillis: Long,
     cacheBytes: Long,
     cacheLimitBytes: Long,
+    newCount: Int,
     refreshEnabled: Boolean,
     onLimitSelected: (Int) -> Unit,
     onClearPreviews: () -> Unit,
+    onMarkNewSeen: () -> Unit,
     onRefresh: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -787,8 +808,13 @@ private fun CacheDialog(
                 TextButton(onClick = onClearPreviews) {
                     Text("清除预览缓存")
                 }
+                if (newCount > 0) {
+                    TextButton(onClick = onMarkNewSeen) {
+                        Text("将 $newCount 张新增照片标为已看")
+                    }
+                }
                 Text(
-                    "断开相机后仍可浏览目录和预览；原始文件不会缓存在应用内。",
+                    "断开相机后仍可浏览已缓存的目录和预览；清除预览后需连接相机重新加载。原图不会缓存在应用内。",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -881,6 +907,9 @@ private fun GalleryFilters(
     counts: Map<PhotoFormatFilter, Int>,
     selectedFormat: PhotoFormatFilter,
     onFormatSelected: (PhotoFormatFilter) -> Unit,
+    statusCounts: Map<PhotoStatusFilter, Int>,
+    selectedStatus: PhotoStatusFilter,
+    onStatusSelected: (PhotoStatusFilter) -> Unit,
     visibleCount: Int,
 ) {
     var dateMenuExpanded by remember { mutableStateOf(false) }
@@ -937,6 +966,31 @@ private fun GalleryFilters(
                     border = BorderStroke(
                         1.dp,
                         if (selectedFormat == format) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.outlineVariant,
+                    ),
+                )
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PhotoStatusFilter.entries.forEach { status ->
+                FilterChip(
+                    selected = selectedStatus == status,
+                    onClick = { onStatusSelected(status) },
+                    label = { Text("${status.label} ${statusCounts[status] ?: 0}") },
+                    shape = RoundedCornerShape(10.dp),
+                    colors = FilterChipDefaults.filterChipColors(
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                        selectedLabelColor = MaterialTheme.colorScheme.primary,
+                    ),
+                    border = BorderStroke(
+                        1.dp,
+                        if (selectedStatus == status) MaterialTheme.colorScheme.primary
                         else MaterialTheme.colorScheme.outlineVariant,
                     ),
                 )
@@ -1084,12 +1138,16 @@ private fun PhotoGrid(
     thumbnails: Map<Long, ByteArray>,
     selected: Set<Long>,
     selectedOrdinals: Map<Long, Int>,
+    newHandles: Set<Long>,
+    downloadedHandles: Set<Long>,
     enabled: Boolean,
+    canFetchThumbnailFromCamera: Boolean,
+    thumbnailCacheRevision: Int,
     selectionMode: Boolean,
     onEnterSelectionMode: () -> Unit,
     onToggle: (Long) -> Unit,
     onSelect: (Collection<Long>) -> Unit,
-    onThumbnailNeeded: (CameraObject) -> Unit,
+    onThumbnailNeeded: (CameraObject, Boolean) -> Unit,
     resetKey: String,
     modifier: Modifier = Modifier,
 ) {
@@ -1116,8 +1174,8 @@ private fun PhotoGrid(
                 var lastHandle: Long? = null
                 var pointer = Offset.Zero
                 var scrollJob: Job? = null
-                val edge = 72.dp.toPx()
-                val step = 16.dp.toPx()
+                val edge = 48.dp.toPx()
+                val step = 6.dp.toPx()
 
                 fun handleAt(position: Offset): Long? = gridState.layoutInfo.visibleItemsInfo
                     .firstOrNull { item ->
@@ -1149,6 +1207,7 @@ private fun PhotoGrid(
                         scrollJob = null
                     } else if (scrollJob?.isActive != true) {
                         scrollJob = launch {
+                            delay(180)
                             while (isActive) {
                                 val currentDirection = when {
                                     pointer.y < edge -> -1
@@ -1158,7 +1217,7 @@ private fun PhotoGrid(
                                 if (currentDirection == 0) break
                                 gridState.scrollBy(step * currentDirection)
                                 selectThrough(pointer)
-                                delay(16)
+                                delay(32)
                             }
                         }
                     }
@@ -1192,44 +1251,31 @@ private fun PhotoGrid(
                 }
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
-                    if (currentSelectionMode) {
-                        val dragStart = awaitTouchSlopOrCancellation(down.id) { change, _ ->
-                            change.consume()
-                        }
-                        if (dragStart != null) {
-                            onStart(down.position, false)
-                            onDragMove(dragStart, Offset.Zero)
-                            try {
-                                do {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull { it.id == down.id }
-                                    if (change != null && change.pressed) onDragMove(change, Offset.Zero)
-                                } while (change?.pressed == true)
-                            } finally { onEnd() }
-                        } else if (currentEvent.changes.any { it.id == down.id && !it.pressed }) {
-                            tapAt(down.position)
-                        }
-                    } else {
-                        val longPress = awaitLongPressOrCancellation(down.id)
-                        if (longPress != null) {
-                            longPress.consume()
-                            onStart(down.position, true)
-                            try {
-                                do {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull { it.id == down.id }
-                                    if (change != null && change.pressed) onDragMove(change, Offset.Zero)
-                                } while (change?.pressed == true)
-                            } finally { onEnd() }
-                        } else if (currentEvent.changes.any { it.id == down.id && !it.pressed }) {
-                            tapAt(down.position)
-                        }
+                    val longPress = awaitLongPressOrCancellation(down.id)
+                    val current = currentEvent.changes.firstOrNull { it.id == down.id }
+                    val horizontalDrag = currentSelectionMode && current != null && current.pressed &&
+                        !current.isConsumed && abs(current.position.x - down.position.x) > viewConfiguration.touchSlop &&
+                        abs(current.position.x - down.position.x) >
+                        abs(current.position.y - down.position.y) * 1.3f
+                    if (longPress != null || horizontalDrag) {
+                        (longPress ?: current)?.consume()
+                        onStart(down.position, longPress != null)
+                        if (horizontalDrag) onDragMove(current, Offset.Zero)
+                        try {
+                            do {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id }
+                                if (change != null && change.pressed) onDragMove(change, Offset.Zero)
+                            } while (change?.pressed == true)
+                        } finally { onEnd() }
+                    } else if (current != null && !current.pressed && !current.isConsumed) {
+                        tapAt(down.position)
                     }
                 }
             }
         },
         state = gridState,
-        userScrollEnabled = !selectionMode,
+        userScrollEnabled = true,
         columns = GridCells.Fixed(3),
         contentPadding = PaddingValues(4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -1251,12 +1297,19 @@ private fun PhotoGrid(
             }
             items(datedPhotos, key = CameraObject::handle) { photo ->
                 val thumbnail = thumbnails[photo.handle]
-                LaunchedEffect(photo.handle, thumbnail, enabled) {
-                    if (thumbnail != null || !enabled) return@LaunchedEffect
+                LaunchedEffect(photo.handle, thumbnail, canFetchThumbnailFromCamera, thumbnailCacheRevision) {
+                    if (thumbnail != null) return@LaunchedEffect
                     delay(THUMBNAIL_VISIBILITY_DEBOUNCE_MS)
-                    onThumbnailNeeded(photo)
+                    onThumbnailNeeded(photo, canFetchThumbnailFromCamera)
                 }
                 val isSelected = photo.handle in selected
+                val isDownloaded = photo.handle in downloadedHandles
+                val isNew = photo.handle in newHandles && !isDownloaded
+                val statusLabel = when {
+                    isDownloaded -> "已下载"
+                    isNew -> "新增"
+                    else -> "未下载"
+                }
                 val shape = RoundedCornerShape(6.dp)
                 Box(
                     modifier = Modifier
@@ -1265,7 +1318,7 @@ private fun PhotoGrid(
                         .background(MaterialTheme.colorScheme.surfaceVariant)
                         .then(if (isSelected) Modifier.border(1.dp, MaterialTheme.colorScheme.primary, shape) else Modifier)
                         .semantics {
-                            contentDescription = "${photo.filename}，${if (isSelected) "已选择第 ${selectedOrdinals[photo.handle]} 项" else "未选择"}"
+                            contentDescription = "${photo.filename}，$statusLabel，${if (isSelected) "已选择第 ${selectedOrdinals[photo.handle]} 项" else "未选择"}"
                             onClick(label = if (isSelected) "取消选择" else "选择照片") {
                                 if (enabled) {
                                     onToggle(photo.handle)
@@ -1312,6 +1365,18 @@ private fun PhotoGrid(
                             color = Color.White,
                         )
                     }
+                    Text(
+                        statusLabel,
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(5.dp)
+                            .background(
+                                if (isNew) MaterialTheme.colorScheme.primary
+                                else Color.Black.copy(alpha = 0.74f),
+                                RoundedCornerShape(4.dp),
+                            )
+                            .padding(horizontal = 5.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isNew) MaterialTheme.colorScheme.onPrimary else Color.White,
+                    )
                 }
             }
         }
@@ -1329,6 +1394,21 @@ private fun dragSelection(
     if (startIndex < 0 || endIndex < 0) return baseline
     val range = orderedHandles.subList(minOf(startIndex, endIndex), maxOf(startIndex, endIndex) + 1)
     return if (anchor in baseline) baseline - range.toSet() else baseline + range
+}
+
+private enum class PhotoStatusFilter(val label: String) {
+    ALL("全部"),
+    NEW("新增"),
+    NOT_DOWNLOADED("未下载"),
+    DOWNLOADED("已下载"),
+    ;
+
+    fun matches(handle: Long, downloaded: Set<Long>, new: Set<Long>): Boolean = when (this) {
+        ALL -> true
+        DOWNLOADED -> handle in downloaded
+        NEW -> handle !in downloaded && handle in new
+        NOT_DOWNLOADED -> handle !in downloaded
+    }
 }
 
 private enum class PhotoFormatFilter(val label: String) {
