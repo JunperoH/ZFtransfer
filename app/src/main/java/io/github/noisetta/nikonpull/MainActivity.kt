@@ -62,6 +62,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -981,6 +982,20 @@ private fun GalleryFilters(
                     selected = selectedStatus == status,
                     onClick = { onStatusSelected(status) },
                     label = { Text("${status.label} ${statusCounts[status] ?: 0}") },
+                    leadingIcon = status.iconResId?.let { iconResId ->
+                        {
+                            Icon(
+                                painter = painterResource(iconResId),
+                                contentDescription = null,
+                                modifier = Modifier.size(17.dp),
+                                tint = if (status == PhotoStatusFilter.NEW || selectedStatus == status) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                            )
+                        }
+                    },
                     shape = RoundedCornerShape(10.dp),
                     colors = FilterChipDefaults.filterChipColors(
                         containerColor = MaterialTheme.colorScheme.surface,
@@ -1305,11 +1320,12 @@ private fun PhotoGrid(
                 val isSelected = photo.handle in selected
                 val isDownloaded = photo.handle in downloadedHandles
                 val isNew = photo.handle in newHandles && !isDownloaded
-                val statusLabel = when {
-                    isDownloaded -> "已下载"
-                    isNew -> "新增"
-                    else -> "未下载"
+                val photoStatus = when {
+                    isDownloaded -> PhotoStatusFilter.DOWNLOADED
+                    isNew -> PhotoStatusFilter.NEW
+                    else -> PhotoStatusFilter.NOT_DOWNLOADED
                 }
+                val statusLabel = photoStatus.label
                 val shape = RoundedCornerShape(6.dp)
                 Box(
                     modifier = Modifier
@@ -1365,18 +1381,27 @@ private fun PhotoGrid(
                             color = Color.White,
                         )
                     }
-                    Text(
-                        statusLabel,
-                        modifier = Modifier.align(Alignment.BottomEnd).padding(5.dp)
+                    Box(
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp)
+                            .size(28.dp)
                             .background(
                                 if (isNew) MaterialTheme.colorScheme.primary
-                                else Color.Black.copy(alpha = 0.74f),
-                                RoundedCornerShape(4.dp),
-                            )
-                            .padding(horizontal = 5.dp, vertical = 2.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (isNew) MaterialTheme.colorScheme.onPrimary else Color.White,
-                    )
+                                else Color.Black.copy(alpha = 0.76f),
+                                CircleShape,
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            painter = painterResource(photoStatus.iconResId!!),
+                            contentDescription = null,
+                            modifier = Modifier.size(17.dp),
+                            tint = when (photoStatus) {
+                                PhotoStatusFilter.NEW -> MaterialTheme.colorScheme.onPrimary
+                                PhotoStatusFilter.DOWNLOADED -> MaterialTheme.colorScheme.primary
+                                else -> Color.White
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -1396,11 +1421,11 @@ private fun dragSelection(
     return if (anchor in baseline) baseline - range.toSet() else baseline + range
 }
 
-private enum class PhotoStatusFilter(val label: String) {
+private enum class PhotoStatusFilter(val label: String, val iconResId: Int? = null) {
     ALL("全部"),
-    NEW("新增"),
-    NOT_DOWNLOADED("未下载"),
-    DOWNLOADED("已下载"),
+    NEW("新增", R.drawable.ic_gallery_new),
+    NOT_DOWNLOADED("未下载", R.drawable.ic_gallery_pending),
+    DOWNLOADED("已下载", R.drawable.ic_gallery_downloaded),
     ;
 
     fun matches(handle: Long, downloaded: Set<Long>, new: Set<Long>): Boolean = when (this) {
